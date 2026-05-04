@@ -1,0 +1,244 @@
+import sys
+import pandas as pd
+import os
+import tkinter as tk
+from tkinter import ttk, filedialog, messagebox
+from datetime import datetime
+
+class ProfessionalAuditor(tk.Tk):
+    def __init__(self):
+        super().__init__()
+        self.title("Professional Version Sync & Auditor")
+        self.geometry("1400x900")
+        self.minsize(1000, 700) # Prevents window from becoming too small to see widgets
+        self.configure(padx=20, pady=20)
+        
+        self.loaded_data = {}  
+        self.init_ui()
+
+    def init_ui(self):
+        # --- 1. TOP BAR (Fixed at Top) ---
+        top_frame = tk.Frame(self)
+        top_frame.pack(side=tk.TOP, fill=tk.X, pady=(0, 10))
+
+        self.btn_load = tk.Button(top_frame, text="Step 1: Load CSV Files", bg="#0078d4", fg="white", 
+                                  font=("Arial", 10, "bold"), command=self.handle_file_loading)
+        self.btn_load.pack(side=tk.LEFT, padx=(0, 15))
+        
+        tk.Label(top_frame, text="Base File:", font=("Arial", 10, "bold")).pack(side=tk.LEFT, padx=5)
+        self.base_file_combo = ttk.Combobox(top_frame, state="readonly", width=25)
+        self.base_file_combo.pack(side=tk.LEFT, padx=5)
+        self.base_file_combo.bind("<<ComboboxSelected>>", self.sync_interface)
+        
+        tk.Label(top_frame, text="Upgraded File:", font=("Arial", 10, "bold")).pack(side=tk.LEFT, padx=5)
+        self.upgrade_file_combo = ttk.Combobox(top_frame, state="readonly", width=25)
+        self.upgrade_file_combo.pack(side=tk.LEFT, padx=5)
+        self.upgrade_file_combo.bind("<<ComboboxSelected>>", self.sync_interface)
+
+
+        # --- 2. BOTTOM ACTION BUTTON (Fixed at Bottom) ---
+        self.btn_execute = tk.Button(self, text="Step 3: RUN COMPARISON & GENERATE EXCEL REPORT", 
+                                     bg="#107c10", fg="white", font=("Arial", 12, "bold"), height=2, 
+                                     command=self.run_audit_process)
+        self.btn_execute.pack(side=tk.BOTTOM, fill=tk.X, pady=(10, 0))
+
+
+        # --- 3. CONSOLE LOG (Fixed at Bottom, right above action button) ---
+        log_frame = tk.Frame(self)
+        log_frame.pack(side=tk.BOTTOM, fill=tk.X, pady=(5, 0))
+        
+        scroll_log = ttk.Scrollbar(log_frame, orient="vertical")
+        scroll_log.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        self.console_log = tk.Text(log_frame, height=6, bg="#1a1a1a", fg="#00ff00", 
+                                   font=("Consolas", 10), yscrollcommand=scroll_log.set)
+        self.console_log.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        scroll_log.config(command=self.console_log.yview)
+        self.console_log.config(state=tk.DISABLED)
+
+
+        # --- 4. MIDDLE EXPANDABLE WORKSPACE ---
+        middle_frame = tk.Frame(self)
+        middle_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+
+        # 4A. Previews Section
+        preview_frame = tk.Frame(middle_frame)
+        preview_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True, pady=(0, 10))
+        
+        base_box = tk.Frame(preview_frame)
+        base_box.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 10))
+        tk.Label(base_box, text="Base File Preview (Top 5 Rows):", font=("Arial", 9, "bold")).pack(anchor=tk.W)
+        self.base_table = self.create_scrollable_treeview(base_box)
+        
+        upgrade_box = tk.Frame(preview_frame)
+        upgrade_box.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True, padx=(10, 0))
+        tk.Label(upgrade_box, text="Upgraded File Preview (Top 5 Rows):", font=("Arial", 9, "bold")).pack(anchor=tk.W)
+        self.upgrade_table = self.create_scrollable_treeview(upgrade_box)
+
+        # 4B. Mapping Section
+        mapping_frame = tk.Frame(middle_frame)
+        mapping_frame.pack(side=tk.BOTTOM, fill=tk.BOTH, expand=True)
+        tk.Label(mapping_frame, text="Step 2: Map Columns for Comparison (Base Column → Upgraded Column)", 
+                 font=("Arial", 10, "bold")).pack(anchor=tk.W, pady=(0, 5))
+        
+        mapping_controls = tk.Frame(mapping_frame)
+        mapping_controls.pack(fill=tk.X, pady=(0, 5))
+        
+        self.base_col_picker = ttk.Combobox(mapping_controls, state="readonly", width=25)
+        self.base_col_picker.pack(side=tk.LEFT, padx=5)
+        tk.Label(mapping_controls, text="→", font=("Arial", 12)).pack(side=tk.LEFT, padx=5)
+        self.upgrade_col_picker = ttk.Combobox(mapping_controls, state="readonly", width=25)
+        self.upgrade_col_picker.pack(side=tk.LEFT, padx=5)
+        
+        self.btn_add_pair = tk.Button(mapping_controls, text="Add Mapping Pair", command=self.add_mapping_row)
+        self.btn_add_pair.pack(side=tk.LEFT, padx=15)
+        
+        mapping_list_container = tk.Frame(mapping_frame)
+        mapping_list_container.pack(fill=tk.BOTH, expand=True)
+        
+        scroll_map_y = ttk.Scrollbar(mapping_list_container, orient="vertical")
+        scroll_map_y.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        self.mapping_list_table = ttk.Treeview(mapping_list_container, columns=("Base", "Upgraded"), 
+                                               show="headings", yscrollcommand=scroll_map_y.set)
+        self.mapping_list_table.heading("Base", text="Base Column")
+        self.mapping_list_table.heading("Upgraded", text="Upgraded Column")
+        self.mapping_list_table.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scroll_map_y.config(command=self.mapping_list_table.yview)
+
+    def create_scrollable_treeview(self, parent_frame):
+        """Creates a Treeview widget with both X and Y scrollbars that resizes correctly."""
+        container = tk.Frame(parent_frame)
+        container.pack(fill=tk.BOTH, expand=True)
+        
+        scroll_y = ttk.Scrollbar(container, orient="vertical")
+        scroll_y.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        scroll_x = ttk.Scrollbar(container, orient="horizontal")
+        scroll_x.pack(side=tk.BOTTOM, fill=tk.X)
+        
+        tree = ttk.Treeview(container, show="headings", 
+                            yscrollcommand=scroll_y.set, xscrollcommand=scroll_x.set)
+        tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        
+        scroll_y.config(command=tree.yview)
+        scroll_x.config(command=tree.xview)
+        
+        return tree
+
+    def log_message(self, message):
+        self.console_log.config(state=tk.NORMAL)
+        self.console_log.insert(tk.END, message + "\n")
+        self.console_log.see(tk.END)
+        self.console_log.config(state=tk.DISABLED)
+
+    def handle_file_loading(self):
+        files = filedialog.askopenfilenames(title="Select CSV Files", filetypes=[("CSV Files", "*.csv")])
+        if files:
+            self.base_file_combo.set('')
+            self.upgrade_file_combo.set('')
+            self.base_col_picker.set('')
+            self.upgrade_col_picker.set('')
+            
+            for f in files:
+                name = os.path.basename(f)
+                self.loaded_data[name] = pd.read_csv(f)
+            
+            file_names = list(self.loaded_data.keys())
+            self.base_file_combo['values'] = file_names
+            self.upgrade_file_combo['values'] = file_names
+            self.log_message(f"System: Successfully loaded {len(files)} files.")
+
+    def sync_interface(self, event=None):
+        base_name = self.base_file_combo.get()
+        up_name = self.upgrade_file_combo.get()
+        
+        self.populate_preview(base_name, self.base_table)
+        self.populate_preview(up_name, self.upgrade_table)
+        
+        if base_name in self.loaded_data and up_name in self.loaded_data:
+            self.base_col_picker['values'] = list(self.loaded_data[base_name].columns)
+            self.upgrade_col_picker['values'] = list(self.loaded_data[up_name].columns)
+
+    def populate_preview(self, name, treeview):
+        treeview.delete(*treeview.get_children())
+        
+        if name in self.loaded_data:
+            df = self.loaded_data[name].head(5)
+            
+            treeview["columns"] = list(df.columns)
+            for col in df.columns:
+                treeview.heading(col, text=col)
+                treeview.column(col, width=120, stretch=tk.NO) 
+                
+            for _, row in df.iterrows():
+                treeview.insert("", "end", values=list(row))
+
+    def add_mapping_row(self):
+        b_col = self.base_col_picker.get()
+        u_col = self.upgrade_col_picker.get()
+        if b_col and u_col:
+            self.mapping_list_table.insert("", "end", values=(b_col, u_col))
+
+    def run_audit_process(self):
+        b_name = self.base_file_combo.get()
+        u_name = self.upgrade_file_combo.get()
+        
+        if not b_name or not u_name:
+            self.log_message("Error: Please select both Base and Upgraded files.")
+            return
+
+        mappings = []
+        for item in self.mapping_list_table.get_children():
+            mappings.append(self.mapping_list_table.item(item)["values"])
+
+        if not mappings:
+            self.log_message("Error: No column mappings defined.")
+            return
+
+        df_b = self.loaded_data[b_name].dropna()
+        df_u = self.loaded_data[u_name].dropna()
+
+        id_col_b, id_col_u = df_b.columns[0], df_u.columns[0]
+        
+        keys_b = set(df_b[id_col_b].astype(str))
+        keys_u = set(df_u[id_col_u].astype(str))
+        
+        missing = pd.DataFrame({"Missing_in_Upgraded": list(keys_b - keys_u)})
+        new_items = pd.DataFrame({"New_in_Upgraded": list(keys_u - keys_b)})
+
+        common_ids = keys_b.intersection(keys_u)
+        df_b_com = df_b[df_b[id_col_b].astype(str).isin(common_ids)].set_index(id_col_b)
+        df_u_com = df_u[df_u[id_col_u].astype(str).isin(common_ids)].set_index(id_col_u)
+
+        variances = []
+        for uid in common_ids:
+            for b_col, u_col in mappings:
+                v_b = df_b_com.loc[uid, b_col]
+                v_u = df_u_com.loc[uid, u_col]
+                if str(v_b) != str(v_u):
+                    variances.append({
+                        "ID": uid,
+                        "Field": f"{b_col} -> {u_col}",
+                        "Base_Value": v_b,
+                        "Upgraded_Value": v_u
+                    })
+
+        try:
+            output_name = f"Audit_Report_{datetime.now().strftime('%H%M%S')}.xlsx"
+            with pd.ExcelWriter(output_name) as writer:
+                pd.DataFrame(variances).to_excel(writer, sheet_name="Variances", index=False)
+                missing.to_excel(writer, sheet_name="Removed_Items", index=False)
+                new_items.to_excel(writer, sheet_name="New_Items", index=False)
+
+            self.log_message(f"SUCCESS: Comparison complete. Report saved as {output_name}")
+            
+            if os.name == 'nt':
+                os.startfile(output_name)
+                
+        except Exception as e:
+            self.log_message(f"Critical Export Error: {str(e)}")
+
+if __name__ == "__main__":
+    app = ProfessionalAuditor()
+    app.mainloop()
