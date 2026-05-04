@@ -1,0 +1,550 @@
+"""
+Professional Version Sync & Auditor  (v3)
+- Sticky RUN button at top (always visible)
+- Fully scrollable body
+- Modern dark UI
+- Smart CSV loader: strips junk header lines like /*===... ===*/
+"""
+
+import os
+import re
+import sys
+import csv
+from datetime import datetime
+from io import StringIO
+from tkinter import (Tk, Frame, Label, Button, Canvas, StringVar, filedialog,
+                     END, BOTH, X, Y, LEFT, RIGHT, TOP, BOTTOM, W, E, N, S)
+from tkinter import ttk
+from tkinter.scrolledtext import ScrolledText
+import pandas as pd
+
+
+# =========================================================
+#  THEME
+# =========================================================
+COLORS = {
+    "bg":         "#0f1419",
+    "panel":      "#1a1f2e",
+    "panel_alt":  "#232938",
+    "border":     "#2d3447",
+    "text":       "#e6e6e6",
+    "text_dim":   "#9aa3b2",
+    "accent":     "#4f8cff",
+    "accent_hov": "#6ba0ff",
+    "success":    "#22c55e",
+    "success_hov":"#34d369",
+    "danger":     "#ef4444",
+    "console_bg": "#0a0e15",
+    "console_fg": "#7ee787",
+}
+FONTS = {
+    "title":  ("Segoe UI", 15, "bold"),
+    "h2":     ("Segoe UI", 10, "bold"),
+    "body":   ("Segoe UI", 10),
+    "small":  ("Segoe UI", 9),
+    "mono":   ("Consolas", 10),
+    "btn":    ("Segoe UI", 10, "bold"),
+    "btn_lg": ("Segoe UI", 12, "bold"),
+}
+
+
+# =========================================================
+#  SMART CSV READER
+# =========================================================
+def smart_read_csv(path):
+    """Strips /*===...===*/ junk and reads clean CSV."""
+    with open(path, "r", encoding="utf-8-sig", errors="replace", newline="") as f:
+        raw_lines = f.readlines()
+
+    cleaned = []
+    for line in raw_lines:
+        stripped = line.strip()
+        if not stripped:
+            continue
+        # pure decoration line (only =, -, *, /, #, spaces)
+        if re.fullmatch(r"[/*=\-#\s]+", stripped):
+            continue
+        # block-comment open/close lines without data
+        if stripped.startswith("/*") and "," not in stripped and ";" not in stripped:
+            continue
+        if stripped.endswith("*/") and "," not in stripped and ";" not in stripped:
+            continue
+        # strip leading /* / trailing */ on data lines
+        line2 = re.sub(r"^/\*+\s*", "", line)
+        line2 = re.sub(r"\s*\*+/\s*$", "", line2)
+        line2 = re.sub(r"^[=\-*#/\s]+", "", line2)
+        line2 = re.sub(r"[=\-*#/\s]+$", "", line2) + "\n"
+        if line2.strip():
+            cleaned.append(line2)
+
+    if not cleaned:
+        return pd.read_csv(path)
+
+    text = "".join(cleaned)
+    try:
+        sep = csv.Sniffer().sniff(text[:2048], delimiters=",;\t|").delimiter
+    except Exception:
+        sep = ","
+
+    df = pd.read_csv(StringIO(text), sep=sep, engine="python")
+    df.columns = [
+        re.sub(r"^[=\-*#/\s\"']+|[=\-*#/\s\"']+$", "", str(c)).strip()
+        for c in df.columns
+    ]
+    df = df.dropna(axis=1, how="all")
+    df = df.loc[:, [c for c in df.columns if c and not str(c).lower().startswith("unnamed")]]
+    return df
+
+
+# =========================================================
+#  BUTTON
+# =========================================================
+class FlatButton(Button):
+    def __init__(self, master, text, command=None, kind="primary", **kw):
+        palette = {
+            "primary": (COLORS["accent"], COLORS["accent_hov"], "white"),
+            "success": (COLORS["success"], COLORS["success_hov"], "white"),
+            "ghost":   (COLORS["panel_alt"], COLORS["border"], COLORS["text"]),
+            "danger":  (COLORS["danger"], "#f87171", "white"),
+        }
+        bg, hov, fg = palette.get(kind, palette["primary"])
+        super().__init__(
+            master, text=text, command=command,
+            bg=bg, fg=fg, activebackground=hov, activeforeground=fg,
+            font=FONTS["btn"], relief="flat", bd=0,
+            padx=14, pady=7, cursor="hand2", **kw
+        )
+        self._bg, self._hov = bg, hov
+        self.bind("<Enter>", lambda e: self.config(bg=self._hov))
+        self.bind("<Leave>", lambda e: self.config(bg=self._bg))
+
+
+# =========================================================
+#  SCROLLABLE FRAME
+# =========================================================
+class ScrollableFrame(Frame):
+    """A frame that scrolls vertically with the mouse wheel."""
+    def __init__(self, parent, bg):
+        super().__init__(parent, bg=bg)
+        self.canvas = Canvas(self, bg=bg, highlightthickness=0)
+        self.scrollbar = ttk.Scrollbar(self, orient="vertical", command=self.canvas.yview)
+        self.inner = Frame(self.canvas, bg=bg)
+
+        self.inner.bind(
+            "<Configure>",
+            lambda e: self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+        )
+        self.window_id = self.canvas.create_window((0, 0), window=self.inner, anchor="nw")
+        self.canvas.configure(yscrollcommand=self.scrollbar.set)
+
+        self.canvas.pack(side=LEFT, fill=BOTH, expand=True)
+        self.scrollbar.pack(side=RIGHT, fill=Y)
+
+        # make inner frame full width of canvas
+        self.canvas.bind("<Configure>",
+                         lambda e: self.canvas.itemconfig(self.window_id, width=e.width))
+
+        # mouse wheel
+        self._bind_mousewheel()
+
+    def _bind_mousewheel(self):
+        def _on_mousewheel(e):
+            # Windows / macOS
+            self.canvas.yview_scroll(int(-1 * (e.delta / 120)), "units")
+
+        def _on_mousewheel_linux(e, direction):
+            self.canvas.yview_scroll(direction, "units")
+
+        # bind on the canvas + recursively on children
+        def _bind_all(widget):
+            widget.bind("<MouseWheel>", _on_mousewheel, add="+")
+            widget.bind("<Button-4>", lambda e: _on_mousewheel_linux(e, -1), add="+")
+            widget.bind("<Button-5>", lambda e: _on_mousewheel_linux(e,  1), add="+")
+            for child in widget.winfo_children():
+                _bind_all(child)
+
+        # Bind initially and after children added
+        self.bind("<Enter>", lambda e: _bind_all(self))
+
+
+# =========================================================
+#  APP
+# =========================================================
+class ProfessionalAuditor:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("Version Sync & Auditor")
+        self.root.geometry("1280x780")
+        self.root.minsize(960, 600)
+        self.root.configure(bg=COLORS["bg"])
+
+        self.loaded_data = {}
+        self._configure_ttk_style()
+        self._build_ui()
+
+    # -----------------------------------------------------
+    def _configure_ttk_style(self):
+        style = ttk.Style()
+        try:
+            style.theme_use("clam")
+        except Exception:
+            pass
+
+        style.configure("Modern.TCombobox",
+            fieldbackground=COLORS["panel_alt"], background=COLORS["panel_alt"],
+            foreground=COLORS["text"], arrowcolor=COLORS["text"],
+            bordercolor=COLORS["border"], lightcolor=COLORS["border"],
+            darkcolor=COLORS["border"], padding=5)
+        style.map("Modern.TCombobox",
+            fieldbackground=[("readonly", COLORS["panel_alt"])],
+            foreground=[("readonly", COLORS["text"])],
+            background=[("readonly", COLORS["panel_alt"])])
+
+        self.root.option_add("*TCombobox*Listbox.background", COLORS["panel"])
+        self.root.option_add("*TCombobox*Listbox.foreground", COLORS["text"])
+        self.root.option_add("*TCombobox*Listbox.selectBackground", COLORS["accent"])
+        self.root.option_add("*TCombobox*Listbox.selectForeground", "white")
+        self.root.option_add("*TCombobox*Listbox.font", FONTS["body"])
+
+        style.configure("Modern.Treeview",
+            background=COLORS["panel"], fieldbackground=COLORS["panel"],
+            foreground=COLORS["text"], bordercolor=COLORS["border"],
+            rowheight=24, font=FONTS["body"])
+        style.configure("Modern.Treeview.Heading",
+            background=COLORS["panel_alt"], foreground=COLORS["text"],
+            font=FONTS["h2"], relief="flat", padding=6)
+        style.map("Modern.Treeview",
+            background=[("selected", COLORS["accent"])],
+            foreground=[("selected", "white")])
+        style.map("Modern.Treeview.Heading",
+            background=[("active", COLORS["border"])])
+
+    # -----------------------------------------------------
+    def _card(self, parent, **pack_kw):
+        outer = Frame(parent, bg=COLORS["border"])
+        outer.pack(**pack_kw)
+        inner = Frame(outer, bg=COLORS["panel"], padx=12, pady=10)
+        inner.pack(fill=BOTH, expand=True, padx=1, pady=1)
+        return inner
+
+    def _label(self, parent, text, font=None, fg=None):
+        return Label(parent, text=text, bg=parent.cget("bg"),
+                     fg=fg or COLORS["text"], font=font or FONTS["body"],
+                     anchor=W, justify="left")
+
+    # -----------------------------------------------------
+    def _build_ui(self):
+        # ============ TOP STICKY HEADER + RUN BUTTON ============
+        top = Frame(self.root, bg=COLORS["bg"])
+        top.pack(side=TOP, fill=X, padx=20, pady=(14, 8))
+
+        title_row = Frame(top, bg=COLORS["bg"])
+        title_row.pack(fill=X)
+        Label(title_row, text="⚡  Version Sync & Auditor",
+              bg=COLORS["bg"], fg=COLORS["text"], font=FONTS["title"]).pack(side=LEFT)
+        Label(title_row,
+              text="  Compare CSV exports across versions and surface every variance.",
+              bg=COLORS["bg"], fg=COLORS["text_dim"], font=FONTS["small"]).pack(side=LEFT, pady=(5, 0))
+
+        # The big visible RUN button — sticky at top right
+        self.run_btn = FlatButton(
+            title_row, "▶  RUN COMPARISON",
+            command=self.run_audit_process, kind="success"
+        )
+        self.run_btn.configure(font=FONTS["btn_lg"], padx=20, pady=10)
+        self.run_btn.pack(side=RIGHT)
+
+        # ============ SCROLLABLE BODY ============
+        scroller = ScrollableFrame(self.root, bg=COLORS["bg"])
+        scroller.pack(fill=BOTH, expand=True, padx=20, pady=(0, 14))
+        body = scroller.inner
+
+        # --- STEP 1 ---
+        card1 = self._card(body, fill=X, pady=(0, 10))
+        self._label(card1, "STEP 1   ·   Load & Select Files",
+                    font=FONTS["h2"], fg=COLORS["accent"]).pack(fill=X, pady=(0, 6))
+
+        row1 = Frame(card1, bg=COLORS["panel"])
+        row1.pack(fill=X)
+        FlatButton(row1, "📂  Load CSV Files",
+                   command=self.handle_file_loading, kind="primary").pack(side=LEFT, padx=(0, 14))
+
+        self._label(row1, "Base", font=FONTS["small"], fg=COLORS["text_dim"]).pack(side=LEFT, padx=(2, 4))
+        self.base_file_var = StringVar()
+        self.base_file_combo = ttk.Combobox(row1, textvariable=self.base_file_var,
+                                             state="readonly", width=28,
+                                             style="Modern.TCombobox", font=FONTS["body"])
+        self.base_file_combo.pack(side=LEFT, padx=(0, 12))
+        self.base_file_combo.bind("<<ComboboxSelected>>", lambda e: self.sync_interface())
+
+        self._label(row1, "Upgraded", font=FONTS["small"], fg=COLORS["text_dim"]).pack(side=LEFT, padx=(2, 4))
+        self.upgrade_file_var = StringVar()
+        self.upgrade_file_combo = ttk.Combobox(row1, textvariable=self.upgrade_file_var,
+                                                state="readonly", width=28,
+                                                style="Modern.TCombobox", font=FONTS["body"])
+        self.upgrade_file_combo.pack(side=LEFT)
+        self.upgrade_file_combo.bind("<<ComboboxSelected>>", lambda e: self.sync_interface())
+
+        # --- PREVIEW ---
+        prev_card = self._card(body, fill=X, pady=(0, 10))
+        self._label(prev_card, "PREVIEW   ·   Top 5 Rows",
+                    font=FONTS["h2"], fg=COLORS["accent"]).pack(fill=X, pady=(0, 6))
+
+        prev_row = Frame(prev_card, bg=COLORS["panel"])
+        prev_row.pack(fill=BOTH, expand=True)
+
+        base_box = Frame(prev_row, bg=COLORS["panel"])
+        base_box.pack(side=LEFT, fill=BOTH, expand=True, padx=(0, 5))
+        self._label(base_box, "Base", font=FONTS["small"], fg=COLORS["text_dim"]).pack(fill=X, pady=(0, 3))
+        self.base_tree = self._make_tree(base_box, height=5)
+
+        up_box = Frame(prev_row, bg=COLORS["panel"])
+        up_box.pack(side=LEFT, fill=BOTH, expand=True, padx=(5, 0))
+        self._label(up_box, "Upgraded", font=FONTS["small"], fg=COLORS["text_dim"]).pack(fill=X, pady=(0, 3))
+        self.upgrade_tree = self._make_tree(up_box, height=5)
+
+        # --- STEP 2: mapping ---
+        card2 = self._card(body, fill=X, pady=(0, 10))
+        self._label(card2, "STEP 2   ·   Map Columns for Comparison",
+                    font=FONTS["h2"], fg=COLORS["accent"]).pack(fill=X, pady=(0, 6))
+
+        map_row = Frame(card2, bg=COLORS["panel"])
+        map_row.pack(fill=X, pady=(0, 6))
+        self.base_col_var = StringVar()
+        self.upgrade_col_var = StringVar()
+        self.base_col_picker = ttk.Combobox(map_row, textvariable=self.base_col_var,
+                                             state="readonly", width=32,
+                                             style="Modern.TCombobox", font=FONTS["body"])
+        self.upgrade_col_picker = ttk.Combobox(map_row, textvariable=self.upgrade_col_var,
+                                                state="readonly", width=32,
+                                                style="Modern.TCombobox", font=FONTS["body"])
+
+        self.base_col_picker.pack(side=LEFT)
+        Label(map_row, text="→", bg=COLORS["panel"], fg=COLORS["accent"],
+              font=("Segoe UI", 13, "bold")).pack(side=LEFT, padx=8)
+        self.upgrade_col_picker.pack(side=LEFT, padx=(0, 12))
+        FlatButton(map_row, "＋ Add Pair",
+                   command=self.add_mapping_row, kind="primary").pack(side=LEFT, padx=(0, 6))
+        FlatButton(map_row, "✕ Remove",
+                   command=self.remove_mapping_row, kind="ghost").pack(side=LEFT)
+
+        map_table_wrap = Frame(card2, bg=COLORS["border"])
+        map_table_wrap.pack(fill=X)
+        map_table_inner = Frame(map_table_wrap, bg=COLORS["panel"])
+        map_table_inner.pack(fill=BOTH, expand=True, padx=1, pady=1)
+
+        self.mapping_tree = ttk.Treeview(map_table_inner,
+                                         columns=("base", "upgrade"),
+                                         show="headings", height=4,
+                                         style="Modern.Treeview")
+        self.mapping_tree.heading("base", text="Base Column")
+        self.mapping_tree.heading("upgrade", text="Upgraded Column")
+        self.mapping_tree.column("base", anchor=W, width=600)
+        self.mapping_tree.column("upgrade", anchor=W, width=600)
+        self.mapping_tree.pack(fill=X, expand=True)
+
+        # --- CONSOLE ---
+        log_card = self._card(body, fill=BOTH, expand=True, pady=(0, 4))
+        self._label(log_card, "CONSOLE",
+                    font=FONTS["h2"], fg=COLORS["accent"]).pack(fill=X, pady=(0, 4))
+        self.console_log = ScrolledText(log_card, height=8,
+                                        bg=COLORS["console_bg"], fg=COLORS["console_fg"],
+                                        insertbackground=COLORS["console_fg"],
+                                        font=FONTS["mono"], relief="flat", bd=0,
+                                        padx=10, pady=8)
+        self.console_log.pack(fill=BOTH, expand=True)
+        self.log("System ready. Load CSV files to begin.")
+
+    def _make_tree(self, parent, height=5):
+        wrap_outer = Frame(parent, bg=COLORS["border"])
+        wrap_outer.pack(fill=BOTH, expand=True)
+        wrap = Frame(wrap_outer, bg=COLORS["panel"])
+        wrap.pack(fill=BOTH, expand=True, padx=1, pady=1)
+
+        tree = ttk.Treeview(wrap, show="headings", height=height, style="Modern.Treeview")
+        vsb = ttk.Scrollbar(wrap, orient="vertical", command=tree.yview)
+        hsb = ttk.Scrollbar(wrap, orient="horizontal", command=tree.xview)
+        tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
+        tree.grid(row=0, column=0, sticky=N + S + E + W)
+        vsb.grid(row=0, column=1, sticky=N + S)
+        hsb.grid(row=1, column=0, sticky=E + W)
+        wrap.rowconfigure(0, weight=1)
+        wrap.columnconfigure(0, weight=1)
+        return tree
+
+    # -----------------------------------------------------
+    def log(self, msg, level="info"):
+        prefix = {"info": "  ", "ok": "✔ ", "warn": "⚠ ", "err": "✖ "}.get(level, "  ")
+        ts = datetime.now().strftime("%H:%M:%S")
+        self.console_log.insert(END, f"[{ts}] {prefix}{msg}\n")
+        self.console_log.see(END)
+
+    # -----------------------------------------------------
+    def handle_file_loading(self):
+        files = filedialog.askopenfilenames(
+            title="Select CSV Files",
+            filetypes=[("CSV Files", "*.csv"), ("All Files", "*.*")]
+        )
+        if not files:
+            return
+
+        self.loaded_data.clear()
+        for f in files:
+            name = os.path.basename(f)
+            try:
+                df = smart_read_csv(f)
+                self.loaded_data[name] = df
+                self.log(f"Loaded {name}  →  {df.shape[0]} rows × {df.shape[1]} cols", "ok")
+                self.log(f"  Columns: {', '.join(map(str, df.columns[:8]))}"
+                         + (" ..." if len(df.columns) > 8 else ""))
+            except Exception as e:
+                self.log(f"Failed to load {name}: {e}", "err")
+
+        names = list(self.loaded_data.keys())
+        self.base_file_combo["values"] = names
+        self.upgrade_file_combo["values"] = names
+
+        if len(names) >= 1:
+            self.base_file_combo.current(0)
+        if len(names) >= 2:
+            self.upgrade_file_combo.current(1)
+        elif len(names) == 1:
+            self.upgrade_file_combo.current(0)
+
+        self.sync_interface()
+
+    def sync_interface(self):
+        base_name = self.base_file_var.get()
+        up_name = self.upgrade_file_var.get()
+
+        self._populate_preview(base_name, self.base_tree)
+        self._populate_preview(up_name, self.upgrade_tree)
+
+        if base_name in self.loaded_data:
+            cols_b = [str(c) for c in self.loaded_data[base_name].columns]
+            self.base_col_picker["values"] = cols_b
+            if cols_b:
+                self.base_col_picker.current(0)
+
+        if up_name in self.loaded_data:
+            cols_u = [str(c) for c in self.loaded_data[up_name].columns]
+            self.upgrade_col_picker["values"] = cols_u
+            if cols_u:
+                self.upgrade_col_picker.current(0)
+
+    def _populate_preview(self, name, tree):
+        for item in tree.get_children():
+            tree.delete(item)
+        tree["columns"] = ()
+
+        if name not in self.loaded_data:
+            return
+
+        df = self.loaded_data[name].head(5)
+        cols = [str(c) for c in df.columns]
+        tree["columns"] = cols
+        for c in cols:
+            tree.heading(c, text=c)
+            tree.column(c, width=130, anchor=W, stretch=False)
+
+        for _, row in df.iterrows():
+            tree.insert("", END, values=[str(v) for v in row.tolist()])
+
+    def add_mapping_row(self):
+        b_col = self.base_col_var.get()
+        u_col = self.upgrade_col_var.get()
+        if b_col and u_col:
+            self.mapping_tree.insert("", END, values=(b_col, u_col))
+            self.log(f"Mapping added: {b_col}  →  {u_col}")
+
+    def remove_mapping_row(self):
+        sel = self.mapping_tree.selection()
+        if not sel:
+            self.log("No mapping selected to remove.", "warn")
+            return
+        for s in sel:
+            self.mapping_tree.delete(s)
+        self.log(f"Removed {len(sel)} mapping(s).")
+
+    # -----------------------------------------------------
+    def run_audit_process(self):
+        b_name = self.base_file_var.get()
+        u_name = self.upgrade_file_var.get()
+
+        if not b_name or not u_name:
+            self.log("Please select both Base and Upgraded files.", "err")
+            return
+
+        mappings = []
+        for iid in self.mapping_tree.get_children():
+            vals = self.mapping_tree.item(iid, "values")
+            mappings.append((vals[0], vals[1]))
+
+        if not mappings:
+            self.log("No column mappings defined.", "err")
+            return
+
+        try:
+            df_b = self.loaded_data[b_name].copy().dropna(how="all")
+            df_u = self.loaded_data[u_name].copy().dropna(how="all")
+
+            id_col_b, id_col_u = df_b.columns[0], df_u.columns[0]
+            self.log(f"Primary key  ·  Base: '{id_col_b}'   Upgraded: '{id_col_u}'")
+
+            df_b[id_col_b] = df_b[id_col_b].astype(str).str.strip()
+            df_u[id_col_u] = df_u[id_col_u].astype(str).str.strip()
+
+            keys_b = set(df_b[id_col_b])
+            keys_u = set(df_u[id_col_u])
+
+            missing = pd.DataFrame({"Missing_in_Upgraded": sorted(keys_b - keys_u)})
+            new_items = pd.DataFrame({"New_in_Upgraded": sorted(keys_u - keys_b)})
+
+            common_ids = keys_b & keys_u
+            df_b_idx = df_b[df_b[id_col_b].isin(common_ids)].drop_duplicates(id_col_b).set_index(id_col_b)
+            df_u_idx = df_u[df_u[id_col_u].isin(common_ids)].drop_duplicates(id_col_u).set_index(id_col_u)
+
+            variances = []
+            for uid in common_ids:
+                for b_col, u_col in mappings:
+                    try:
+                        v_b = df_b_idx.loc[uid, b_col]
+                        v_u = df_u_idx.loc[uid, u_col]
+                    except KeyError:
+                        continue
+                    if str(v_b).strip() != str(v_u).strip():
+                        variances.append({
+                            "ID": uid,
+                            "Field": f"{b_col} → {u_col}",
+                            "Base_Value": v_b,
+                            "Upgraded_Value": v_u,
+                        })
+
+            output_name = f"Audit_Report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+            with pd.ExcelWriter(output_name, engine="openpyxl") as writer:
+                pd.DataFrame(variances).to_excel(writer, sheet_name="Variances", index=False)
+                missing.to_excel(writer, sheet_name="Removed_Items", index=False)
+                new_items.to_excel(writer, sheet_name="New_Items", index=False)
+
+            self.log(f"Report saved → {output_name}", "ok")
+            self.log(f"  Variances: {len(variances)}   |   Removed: {len(missing)}   |   New: {len(new_items)}")
+
+            try:
+                if os.name == "nt":
+                    os.startfile(output_name)
+                elif sys.platform == "darwin":
+                    os.system(f'open "{output_name}"')
+                else:
+                    os.system(f'xdg-open "{output_name}"')
+            except Exception as e:
+                self.log(f"(Could not auto-open file: {e})", "warn")
+
+        except Exception as e:
+            self.log(f"FATAL: {e}", "err")
+
+
+# =========================================================
+if __name__ == "__main__":
+    root = Tk()
+    app = ProfessionalAuditor(root)
+    root.mainloop()
