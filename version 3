@@ -1,0 +1,1114 @@
+"""
+Professional Version Sync & Auditor  (v5)
+- Accepts both CSV and Excel files (.xlsx, .xls, .xlsm)
+- Smart loader strips junk header lines from CSVs and auto-detects header row in Excels
+- Redesigned Excel output: one row per differing parameter with all column pairs shown
+- Sticky RUN button at top (always visible)
+- Fully scrollable body
+- Modern dark UI with refined aesthetics
+"""
+
+import os
+import re
+import sys
+import csv
+from datetime import datetime
+from io import StringIO
+from tkinter import (Tk, Frame, Label, Button, Canvas, StringVar, filedialog,
+                     END, BOTH, X, Y, LEFT, RIGHT, TOP, BOTTOM, W, E, N, S,
+                     IntVar, Checkbutton)
+from tkinter import ttk
+from tkinter.scrolledtext import ScrolledText
+import pandas as pd
+from openpyxl.styles import (PatternFill, Font, Alignment, Border, Side,
+                              GradientFill)
+from openpyxl.utils import get_column_letter
+from openpyxl import load_workbook
+
+
+# =========================================================
+#  THEME
+# =========================================================
+COLORS = {
+    "bg":           "#0c0f1a",
+    "panel":        "#131929",
+    "panel_alt":    "#1c2236",
+    "panel_hover":  "#202840",
+    "border":       "#252d45",
+    "border_light": "#303d5e",
+    "text":         "#dde3f0",
+    "text_dim":     "#7a87a8",
+    "text_muted":   "#4a5470",
+    "accent":       "#3d7fff",
+    "accent_hov":   "#5c95ff",
+    "accent_glow":  "#1a3a7a",
+    "success":      "#10b981",
+    "success_hov":  "#34d399",
+    "success_glow": "#0a3d28",
+    "warning":      "#f59e0b",
+    "danger":       "#ef4444",
+    "danger_hov":   "#f87171",
+    "console_bg":   "#080b14",
+    "console_fg":   "#4ade80",
+    "console_dim":  "#22543d",
+    "tag_blue":     "#1e3a5f",
+    "tag_green":    "#14402e",
+    "tag_red":      "#4a1515",
+}
+FONTS = {
+    "title":    ("Segoe UI", 16, "bold"),
+    "h2":       ("Segoe UI", 10, "bold"),
+    "h3":       ("Segoe UI", 9, "bold"),
+    "body":     ("Segoe UI", 10),
+    "small":    ("Segoe UI", 9),
+    "tiny":     ("Segoe UI", 8),
+    "mono":     ("Cascadia Code", 10) if sys.platform == "win32" else ("Consolas", 10),
+    "mono_sm":  ("Cascadia Code", 9) if sys.platform == "win32" else ("Consolas", 9),
+    "btn":      ("Segoe UI", 10, "bold"),
+    "btn_lg":   ("Segoe UI", 12, "bold"),
+}
+
+# File extensions
+CSV_EXTS   = {".csv", ".tsv", ".txt"}
+EXCEL_EXTS = {".xlsx", ".xls", ".xlsm", ".xlsb"}
+
+
+# =========================================================
+#  COLUMN-NAME CLEANER (shared)
+# =========================================================
+def _clean_columns(df):
+    """Strip decoration chars from column names, drop empty/Unnamed cols."""
+    df.columns = [
+        re.sub(r"^[=\-*#/\s\"']+|[=\-*#/\s\"']+$", "", str(c)).strip()
+        for c in df.columns
+    ]
+    df = df.dropna(axis=1, how="all")
+    df = df.loc[:, [c for c in df.columns
+                    if c and not str(c).lower().startswith("unnamed")]]
+    return df
+
+
+# =========================================================
+#  SMART CSV READER
+# =========================================================
+def smart_read_csv(path):
+    """Strips /*===...===*/ junk and reads clean CSV."""
+    with open(path, "r", encoding="utf-8-sig", errors="replace", newline="") as f:
+        raw_lines = f.readlines()
+
+    cleaned = []
+    for line in raw_lines:
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if re.fullmatch(r"[/*=\-#\s]+", stripped):
+            continue
+        if stripped.startswith("/*") and "," not in stripped and ";" not in stripped:
+            continue
+        if stripped.endswith("*/") and "," not in stripped and ";" not in stripped:
+            continue
+        line2 = re.sub(r"^/\*+\s*", "", line)
+        line2 = re.sub(r"\s*\*+/\s*$", "", line2)
+        line2 = re.sub(r"^[=\-*#/\s]+", "", line2)
+        line2 = re.sub(r"[=\-*#/\s]+$", "", line2) + "\n"
+        if line2.strip():
+            cleaned.append(line2)
+
+    if not cleaned:
+        return pd.read_csv(path)
+
+    text = "".join(cleaned)
+    try:
+        sep = csv.Sniffer().sniff(text[:2048], delimiters=",;\t|").delimiter
+    except Exception:
+        sep = ","
+
+    df = pd.read_csv(StringIO(text), sep=sep, engine="python")
+    return _clean_columns(df)
+
+
+# =========================================================
+#  SMART EXCEL READER
+# =========================================================
+def smart_read_excel(path, sheet_name=None):
+    """
+    Read an Excel file, auto-detecting the header row if the first row
+    looks like junk (title banner, decoration, mostly-empty, etc.).
+    Returns (df, sheet_used).
+    """
+    # Pick engine based on extension
+    ext = os.path.splitext(path)[1].lower()
+    engine = None
+    if ext == ".xlsx" or ext == ".xlsm":
+        engine = "openpyxl"
+    elif ext == ".xlsb":
+        engine = "pyxlsb"
+    elif ext == ".xls":
+        engine = "xlrd"
+
+    # Pick sheet — first sheet by default
+    try:
+        xl = pd.ExcelFile(path, engine=engine)
+        sheets = xl.sheet_names
+    except Exception:
+        # Let pandas try to auto-pick engine
+        xl = pd.ExcelFile(path)
+        sheets = xl.sheet_names
+        engine = None
+
+    sheet_used = sheet_name if sheet_name in sheets else sheets[0]
+
+    # First attempt: standard read
+    df = pd.read_excel(path, sheet_name=sheet_used, engine=engine)
+
+    def _bad_header_ratio(frame):
+        if len(frame.columns) == 0:
+            return 1.0
+        bad = sum(
+            1 for c in frame.columns
+            if str(c).strip() == ""
+            or str(c).lower().startswith("unnamed")
+            or re.fullmatch(r"[=\-*#/\s\"']+", str(c).strip() or "")
+        )
+        return bad / len(frame.columns)
+
+    # If most columns look junk, scan first 15 rows to find a real header row
+    if _bad_header_ratio(df) > 0.5:
+        best_df = df
+        best_ratio = _bad_header_ratio(df)
+        for header_row in range(1, 16):
+            try:
+                df_try = pd.read_excel(
+                    path, sheet_name=sheet_used,
+                    header=header_row, engine=engine
+                )
+                r = _bad_header_ratio(df_try)
+                if r < best_ratio and len(df_try.columns) >= 2:
+                    best_df = df_try
+                    best_ratio = r
+                    if r < 0.2:
+                        break
+            except Exception:
+                continue
+        df = best_df
+
+    df = _clean_columns(df)
+    # Drop fully empty rows that often hang around after junk-row skip
+    df = df.dropna(how="all").reset_index(drop=True)
+    return df, sheet_used
+
+
+# =========================================================
+#  UNIFIED FILE READER
+# =========================================================
+def smart_read_file(path):
+    """
+    Dispatch to CSV or Excel reader based on file extension.
+    Returns (df, info_str) where info_str is human-readable detail
+    (e.g. sheet name for Excel).
+    """
+    ext = os.path.splitext(path)[1].lower()
+    if ext in EXCEL_EXTS:
+        df, sheet = smart_read_excel(path)
+        return df, f"sheet: '{sheet}'"
+    elif ext in CSV_EXTS:
+        return smart_read_csv(path), "csv"
+    else:
+        # Try CSV first as a fallback for unknown extensions
+        try:
+            return smart_read_csv(path), "csv (fallback)"
+        except Exception:
+            df, sheet = smart_read_excel(path)
+            return df, f"excel fallback, sheet: '{sheet}'"
+
+
+# =========================================================
+#  EXCEL STYLER
+# =========================================================
+def style_excel_report(output_path, variances_df, missing_df, new_items_df, mappings):
+    """Apply rich formatting to the Excel report."""
+    wb = load_workbook(output_path)
+
+    # ── colour palette ──────────────────────────────────────
+    H_FILL   = PatternFill("solid", fgColor="1A2744")
+    VAR_FILL = PatternFill("solid", fgColor="1C1C2E")
+    ALT_FILL = PatternFill("solid", fgColor="111122")
+    B_FILL   = PatternFill("solid", fgColor="0D2233")
+    U_FILL   = PatternFill("solid", fgColor="0D3322")
+    P_FILL   = PatternFill("solid", fgColor="1E1E1E")
+    DIFF_FILL= PatternFill("solid", fgColor="3D1515")
+    REM_FILL = PatternFill("solid", fgColor="2D1010")
+    NEW_FILL = PatternFill("solid", fgColor="0D2D18")
+    SUMM_FILL= PatternFill("solid", fgColor="0A0F20")
+
+    H_FONT    = Font(name="Calibri", bold=True, color="A8BFFF", size=10)
+    PARAM_FONT= Font(name="Calibri", bold=True, color="E8E8E8", size=10)
+    BASE_FONT = Font(name="Calibri", color="7EC8E3", size=10)
+    UPG_FONT  = Font(name="Calibri", color="7EE8C0", size=10)
+    DIFF_FONT = Font(name="Calibri", bold=True, color="FF8080", size=10)
+    NORM_FONT = Font(name="Calibri", color="CCCCCC", size=10)
+
+    thin  = Side(style="thin",   color="2A3550")
+    thick = Side(style="medium", color="3D5080")
+    outer_border = Border(left=thick, right=thick, top=thick, bottom=thick)
+    inner_border = Border(left=thin,  right=thin,  top=thin,  bottom=thin)
+    center = Alignment(horizontal="center", vertical="center", wrap_text=False)
+    left_a = Alignment(horizontal="left",   vertical="center", wrap_text=False)
+
+    def _apply_sheet(ws, df, header_labels, col_styles):
+        ws.sheet_view.showGridLines = False
+        ws.sheet_properties.tabColor = "1A2744"
+
+        for col_idx, label in enumerate(header_labels, 1):
+            cell = ws.cell(row=1, column=col_idx)
+            cell.value = label
+            cell.fill = H_FILL
+            cell.font = H_FONT
+            cell.alignment = center
+            cell.border = inner_border
+
+        for row_idx, row_data in enumerate(df.itertuples(index=False), 2):
+            row_fill = VAR_FILL if row_idx % 2 == 0 else ALT_FILL
+            for col_idx, (val, style) in enumerate(zip(row_data, col_styles), 1):
+                cell = ws.cell(row=row_idx, column=col_idx,
+                               value=str(val) if pd.notna(val) else "")
+                cell.alignment = left_a
+                cell.border = inner_border
+                if style == "param":
+                    cell.fill = P_FILL
+                    cell.font = PARAM_FONT
+                elif style == "base":
+                    cell.fill = B_FILL
+                    cell.font = BASE_FONT
+                elif style == "upgraded":
+                    cell.fill = U_FILL
+                    cell.font = UPG_FONT
+                elif style == "diff":
+                    cell.fill = DIFF_FILL
+                    cell.font = DIFF_FONT
+                elif style == "removed":
+                    cell.fill = REM_FILL
+                    cell.font = Font(name="Calibri", color="FF9999", size=10)
+                elif style == "added":
+                    cell.fill = NEW_FILL
+                    cell.font = Font(name="Calibri", color="99FFbb", size=10)
+                else:
+                    cell.fill = row_fill
+                    cell.font = NORM_FONT
+
+        for col_idx, col in enumerate(ws.iter_cols(min_row=1, max_row=ws.max_row), 1):
+            max_len = max((len(str(c.value or "")) for c in col), default=10)
+            ws.column_dimensions[get_column_letter(col_idx)].width = min(max_len + 4, 45)
+
+        ws.freeze_panes = "A2"
+        ws.row_dimensions[1].height = 22
+        for r in range(2, ws.max_row + 1):
+            ws.row_dimensions[r].height = 20
+
+    # ── VARIANCES sheet ─────────────────────────────────────
+    ws_var = wb["Variances"]
+    if not variances_df.empty:
+        headers = list(variances_df.columns)
+
+        ws_var.sheet_view.showGridLines = False
+        ws_var.sheet_properties.tabColor = "1A2744"
+
+        for ci, h in enumerate(headers, 1):
+            cell = ws_var.cell(row=1, column=ci)
+            cell.value = h
+            cell.fill = H_FILL
+            cell.font = H_FONT
+            cell.alignment = center
+            cell.border = inner_border
+
+        for ri, (_, row) in enumerate(variances_df.iterrows(), 2):
+            fill = VAR_FILL if ri % 2 == 0 else ALT_FILL
+            for ci, col_name in enumerate(headers, 1):
+                val = row[col_name]
+                cell = ws_var.cell(row=ri, column=ci,
+                                   value=str(val) if pd.notna(val) else "—")
+                cell.border = inner_border
+                cell.alignment = left_a
+
+                if ci == 1:
+                    cell.fill = P_FILL
+                    cell.font = PARAM_FONT
+                else:
+                    col_idx_0 = ci - 2
+                    pair_idx   = col_idx_0 // 2
+                    is_upgraded = col_idx_0 % 2 == 1
+
+                    if 0 <= pair_idx < len(mappings):
+                        b_col_h = f"{mappings[pair_idx][0]} (Base)"
+                        u_col_h = f"{mappings[pair_idx][1]} (Upgraded)"
+                        base_val = str(row.get(b_col_h, "")).strip()
+                        upgr_val = str(row.get(u_col_h, "")).strip()
+                        has_diff = base_val != upgr_val
+
+                        if not is_upgraded:
+                            cell.fill = B_FILL
+                            cell.font = DIFF_FONT if has_diff else BASE_FONT
+                        else:
+                            cell.fill = DIFF_FILL if has_diff else U_FILL
+                            cell.font = DIFF_FONT if has_diff else UPG_FONT
+                    else:
+                        cell.fill = fill
+                        cell.font = NORM_FONT
+
+        for col in ws_var.iter_cols(min_row=1, max_row=ws_var.max_row):
+            max_len = max((len(str(c.value or "")) for c in col), default=10)
+            ws_var.column_dimensions[get_column_letter(col[0].column)].width = min(max_len + 4, 42)
+        ws_var.freeze_panes = "A2"
+        ws_var.row_dimensions[1].height = 22
+        for r in range(2, ws_var.max_row + 1):
+            ws_var.row_dimensions[r].height = 20
+
+    # ── REMOVED sheet ───────────────────────────────────────
+    if "Removed_Items" in wb.sheetnames:
+        ws_rem = wb["Removed_Items"]
+        ws_rem.sheet_view.showGridLines = False
+        if not missing_df.empty:
+            _apply_sheet(ws_rem, missing_df,
+                         list(missing_df.columns),
+                         ["removed"] * len(missing_df.columns))
+
+    # ── NEW ITEMS sheet ─────────────────────────────────────
+    if "New_Items" in wb.sheetnames:
+        ws_new = wb["New_Items"]
+        ws_new.sheet_view.showGridLines = False
+        if not new_items_df.empty:
+            _apply_sheet(ws_new, new_items_df,
+                         list(new_items_df.columns),
+                         ["added"] * len(new_items_df.columns))
+
+    # ── SUMMARY sheet ───────────────────────────────────────
+    if "Summary" in wb.sheetnames:
+        ws_sum = wb["Summary"]
+        ws_sum.sheet_view.showGridLines = False
+        ws_sum.sheet_properties.tabColor = "223344"
+        for row in ws_sum.iter_rows():
+            for cell in row:
+                cell.fill = SUMM_FILL
+                if cell.row == 1:
+                    cell.font = Font(name="Calibri", bold=True, color="A8BFFF", size=11)
+                else:
+                    cell.font = Font(name="Calibri", color="CCCCCC", size=10)
+                cell.alignment = left_a
+
+    wb.save(output_path)
+
+
+# =========================================================
+#  BUTTON
+# =========================================================
+class FlatButton(Button):
+    def __init__(self, master, text, command=None, kind="primary", **kw):
+        palette = {
+            "primary": (COLORS["accent"],    COLORS["accent_hov"],   "white"),
+            "success": (COLORS["success"],   COLORS["success_hov"],  "white"),
+            "ghost":   (COLORS["panel_alt"], COLORS["border_light"], COLORS["text"]),
+            "danger":  (COLORS["danger"],    COLORS["danger_hov"],   "white"),
+            "subtle":  (COLORS["panel"],     COLORS["panel_alt"],    COLORS["text_dim"]),
+        }
+        bg, hov, fg = palette.get(kind, palette["primary"])
+        super().__init__(
+            master, text=text, command=command,
+            bg=bg, fg=fg, activebackground=hov, activeforeground=fg,
+            font=FONTS["btn"], relief="flat", bd=0,
+            padx=14, pady=7, cursor="hand2", **kw
+        )
+        self._bg, self._hov = bg, hov
+        self.bind("<Enter>", lambda e: self.config(bg=self._hov))
+        self.bind("<Leave>", lambda e: self.config(bg=self._bg))
+
+
+# =========================================================
+#  SCROLLABLE FRAME
+# =========================================================
+class ScrollableFrame(Frame):
+    def __init__(self, parent, bg):
+        super().__init__(parent, bg=bg)
+        self.canvas = Canvas(self, bg=bg, highlightthickness=0)
+        self.scrollbar = ttk.Scrollbar(self, orient="vertical", command=self.canvas.yview)
+        self.inner = Frame(self.canvas, bg=bg)
+
+        self.inner.bind(
+            "<Configure>",
+            lambda e: self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+        )
+        self.window_id = self.canvas.create_window((0, 0), window=self.inner, anchor="nw")
+        self.canvas.configure(yscrollcommand=self.scrollbar.set)
+
+        self.canvas.pack(side=LEFT, fill=BOTH, expand=True)
+        self.scrollbar.pack(side=RIGHT, fill=Y)
+        self.canvas.bind("<Configure>",
+                         lambda e: self.canvas.itemconfig(self.window_id, width=e.width))
+        self._bind_mousewheel()
+
+    def _bind_mousewheel(self):
+        def _scroll(e):
+            self.canvas.yview_scroll(int(-1 * (e.delta / 120)), "units")
+        def _scroll_linux(e, d):
+            self.canvas.yview_scroll(d, "units")
+        def _bind_all(widget):
+            widget.bind("<MouseWheel>", _scroll, add="+")
+            widget.bind("<Button-4>", lambda e: _scroll_linux(e, -1), add="+")
+            widget.bind("<Button-5>", lambda e: _scroll_linux(e,  1), add="+")
+            for child in widget.winfo_children():
+                _bind_all(child)
+        self.bind("<Enter>", lambda e: _bind_all(self))
+
+
+# =========================================================
+#  STATUS BAR PILL
+# =========================================================
+class StatusPill(Label):
+    def __init__(self, parent, text="", kind="neutral"):
+        colors = {
+            "neutral": (COLORS["panel_alt"], COLORS["text_dim"]),
+            "ok":      (COLORS["tag_green"], COLORS["success"]),
+            "warn":    ("#3d2e00",            COLORS["warning"]),
+            "err":     (COLORS["tag_red"],    COLORS["danger"]),
+        }
+        bg, fg = colors.get(kind, colors["neutral"])
+        super().__init__(parent, text=f"  {text}  ", bg=bg, fg=fg,
+                         font=FONTS["small"], relief="flat", padx=6, pady=2)
+
+
+# =========================================================
+#  APP
+# =========================================================
+class ProfessionalAuditor:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("Version Sync & Auditor  v5")
+        self.root.geometry("1360x820")
+        self.root.minsize(1000, 640)
+        self.root.configure(bg=COLORS["bg"])
+
+        self.loaded_data  = {}
+        self.file_stats   = {}   # name → (rows, cols, source_info)
+        self._run_count   = 0
+
+        self._configure_ttk_style()
+        self._build_ui()
+
+    # ─────────────────────────────────────────────────────────
+    def _configure_ttk_style(self):
+        style = ttk.Style()
+        try:
+            style.theme_use("clam")
+        except Exception:
+            pass
+
+        style.configure("Modern.TCombobox",
+            fieldbackground=COLORS["panel_alt"], background=COLORS["panel_alt"],
+            foreground=COLORS["text"], arrowcolor=COLORS["text"],
+            bordercolor=COLORS["border"], lightcolor=COLORS["border"],
+            darkcolor=COLORS["border"], padding=6, relief="flat")
+        style.map("Modern.TCombobox",
+            fieldbackground=[("readonly", COLORS["panel_alt"])],
+            foreground=[("readonly", COLORS["text"])],
+            background=[("readonly", COLORS["panel_alt"])])
+
+        self.root.option_add("*TCombobox*Listbox.background", COLORS["panel_alt"])
+        self.root.option_add("*TCombobox*Listbox.foreground", COLORS["text"])
+        self.root.option_add("*TCombobox*Listbox.selectBackground", COLORS["accent"])
+        self.root.option_add("*TCombobox*Listbox.selectForeground", "white")
+        self.root.option_add("*TCombobox*Listbox.font", FONTS["body"])
+
+        style.configure("Modern.Treeview",
+            background=COLORS["panel"], fieldbackground=COLORS["panel"],
+            foreground=COLORS["text"], bordercolor=COLORS["border"],
+            rowheight=26, font=FONTS["body"])
+        style.configure("Modern.Treeview.Heading",
+            background=COLORS["panel_alt"], foreground=COLORS["accent"],
+            font=FONTS["h3"], relief="flat", padding=6)
+        style.map("Modern.Treeview",
+            background=[("selected", COLORS["accent"])],
+            foreground=[("selected", "white")])
+        style.map("Modern.Treeview.Heading",
+            background=[("active", COLORS["border_light"])])
+
+        style.configure("Vertical.TScrollbar",
+            background=COLORS["panel_alt"], troughcolor=COLORS["panel"],
+            arrowcolor=COLORS["text_muted"], bordercolor=COLORS["panel"],
+            relief="flat")
+        style.configure("Horizontal.TScrollbar",
+            background=COLORS["panel_alt"], troughcolor=COLORS["panel"],
+            arrowcolor=COLORS["text_muted"], bordercolor=COLORS["panel"],
+            relief="flat")
+
+    # ─────────────────────────────────────────────────────────
+    def _card(self, parent, title=None, accent_line=True, **pack_kw):
+        outer = Frame(parent, bg=COLORS["border"])
+        outer.pack(**pack_kw)
+        if accent_line:
+            accent = Frame(outer, bg=COLORS["accent"], height=2)
+            accent.pack(fill=X)
+        inner = Frame(outer, bg=COLORS["panel"], padx=16, pady=12)
+        inner.pack(fill=BOTH, expand=True, padx=1, pady=(0, 1))
+        if title:
+            self._section_label(inner, title).pack(fill=X, pady=(0, 8))
+        return inner
+
+    def _section_label(self, parent, text):
+        row = Frame(parent, bg=COLORS["panel"])
+        Label(row, text=text, bg=COLORS["panel"], fg=COLORS["accent"],
+              font=FONTS["h2"]).pack(side=LEFT)
+        Frame(row, bg=COLORS["border_light"], height=1).pack(
+            side=LEFT, fill=X, expand=True, padx=(10, 0), pady=(2, 0))
+        return row
+
+    def _label(self, parent, text, font=None, fg=None):
+        return Label(parent, text=text, bg=parent.cget("bg"),
+                     fg=fg or COLORS["text"], font=font or FONTS["body"],
+                     anchor=W, justify="left")
+
+    def _sep(self, parent):
+        Frame(parent, bg=COLORS["border"], height=1).pack(fill=X, pady=6)
+
+    # ─────────────────────────────────────────────────────────
+    def _build_ui(self):
+        # ══ HEADER BAR ════════════════════════════════════════
+        header = Frame(self.root, bg=COLORS["panel"], height=56)
+        header.pack(side=TOP, fill=X)
+        header.pack_propagate(False)
+
+        Frame(header, bg=COLORS["accent"], width=4).pack(side=LEFT, fill=Y)
+
+        Label(header, text="⚡", bg=COLORS["panel"],
+              fg=COLORS["accent"], font=("Segoe UI", 18)).pack(side=LEFT, padx=(14, 6))
+        Label(header, text="Version Sync & Auditor",
+              bg=COLORS["panel"], fg=COLORS["text"], font=FONTS["title"]).pack(side=LEFT)
+        Label(header, text="  ·  Compare CSV / Excel exports across versions and surface every variance",
+              bg=COLORS["panel"], fg=COLORS["text_muted"], font=FONTS["small"]).pack(side=LEFT, pady=(6, 0))
+
+        # RUN button — always visible in header
+        self.run_btn = FlatButton(
+            header, "▶  RUN COMPARISON",
+            command=self.run_audit_process, kind="success"
+        )
+        self.run_btn.configure(font=FONTS["btn_lg"], padx=24, pady=10)
+        self.run_btn.pack(side=RIGHT, padx=16, pady=8)
+
+        self.status_var = StringVar(value="Ready")
+        self.status_pill = Label(header, textvariable=self.status_var,
+                                 bg=COLORS["panel_alt"], fg=COLORS["text_dim"],
+                                 font=FONTS["small"], padx=10, pady=4)
+        self.status_pill.pack(side=RIGHT, padx=(0, 8))
+
+        Frame(self.root, bg=COLORS["accent"], height=1).pack(fill=X)
+
+        # ══ SCROLLABLE BODY ═══════════════════════════════════
+        scroller = ScrollableFrame(self.root, bg=COLORS["bg"])
+        scroller.pack(fill=BOTH, expand=True, padx=18, pady=12)
+        body = scroller.inner
+
+        # ── STEP 1: Load Files ───────────────────────────────
+        c1 = self._card(body, fill=X, pady=(0, 10))
+        self._section_label(c1, "STEP 1   ·   Load & Select Files  (CSV or Excel)").pack(fill=X, pady=(0, 10))
+
+        load_row = Frame(c1, bg=COLORS["panel"])
+        load_row.pack(fill=X)
+
+        FlatButton(load_row, "📂  Load Files",
+                   command=self.handle_file_loading, kind="primary").pack(side=LEFT, padx=(0, 16))
+
+        # Base file
+        self._label(load_row, "Base:", font=FONTS["h3"],
+                    fg=COLORS["text_dim"]).pack(side=LEFT, padx=(0, 5))
+        self.base_file_var = StringVar()
+        self.base_file_combo = ttk.Combobox(load_row, textvariable=self.base_file_var,
+                                             state="readonly", width=30,
+                                             style="Modern.TCombobox", font=FONTS["body"])
+        self.base_file_combo.pack(side=LEFT, padx=(0, 4))
+        self.base_file_combo.bind("<<ComboboxSelected>>", lambda e: self.sync_interface())
+        self.base_stat_lbl = Label(load_row, text="", bg=COLORS["panel"],
+                                   fg=COLORS["text_muted"], font=FONTS["tiny"])
+        self.base_stat_lbl.pack(side=LEFT, padx=(0, 18))
+
+        # Upgraded file
+        self._label(load_row, "Upgraded:", font=FONTS["h3"],
+                    fg=COLORS["text_dim"]).pack(side=LEFT, padx=(0, 5))
+        self.upgrade_file_var = StringVar()
+        self.upgrade_file_combo = ttk.Combobox(load_row, textvariable=self.upgrade_file_var,
+                                                state="readonly", width=30,
+                                                style="Modern.TCombobox", font=FONTS["body"])
+        self.upgrade_file_combo.pack(side=LEFT, padx=(0, 4))
+        self.upgrade_file_combo.bind("<<ComboboxSelected>>", lambda e: self.sync_interface())
+        self.upg_stat_lbl = Label(load_row, text="", bg=COLORS["panel"],
+                                  fg=COLORS["text_muted"], font=FONTS["tiny"])
+        self.upg_stat_lbl.pack(side=LEFT)
+
+        # ── PREVIEW ──────────────────────────────────────────
+        cp = self._card(body, fill=X, pady=(0, 10))
+        self._section_label(cp, "PREVIEW   ·   Top 5 Rows").pack(fill=X, pady=(0, 8))
+
+        prev_row = Frame(cp, bg=COLORS["panel"])
+        prev_row.pack(fill=BOTH, expand=True)
+
+        base_box = Frame(prev_row, bg=COLORS["panel"])
+        base_box.pack(side=LEFT, fill=BOTH, expand=True, padx=(0, 6))
+        Label(base_box, text="Base File", bg=COLORS["panel"],
+              fg=COLORS["text_dim"], font=FONTS["tiny"]).pack(fill=X, pady=(0, 4))
+        self.base_tree = self._make_tree(base_box, height=5)
+
+        Frame(prev_row, bg=COLORS["border"], width=1).pack(side=LEFT, fill=Y)
+
+        up_box = Frame(prev_row, bg=COLORS["panel"])
+        up_box.pack(side=LEFT, fill=BOTH, expand=True, padx=(6, 0))
+        Label(up_box, text="Upgraded File", bg=COLORS["panel"],
+              fg=COLORS["text_dim"], font=FONTS["tiny"]).pack(fill=X, pady=(0, 4))
+        self.upgrade_tree = self._make_tree(up_box, height=5)
+
+        # ── STEP 2: Column Mapping ───────────────────────────
+        c2 = self._card(body, fill=X, pady=(0, 10))
+        self._section_label(c2, "STEP 2   ·   Map Columns for Comparison").pack(fill=X, pady=(0, 10))
+
+        tip = Frame(c2, bg=COLORS["tag_blue"], padx=10, pady=6)
+        tip.pack(fill=X, pady=(0, 10))
+        Label(tip, bg=COLORS["tag_blue"], fg=COLORS["accent"],
+              font=FONTS["small"], anchor=W, justify="left",
+              text=(
+                  "ℹ  Select a column from Base and its matching column in Upgraded, then click Add Pair.\n"
+                  "   The report will list every row where the values differ, with both versions side by side."
+              )).pack(fill=X)
+
+        map_row = Frame(c2, bg=COLORS["panel"])
+        map_row.pack(fill=X, pady=(0, 8))
+
+        self._label(map_row, "Base col:", font=FONTS["small"],
+                    fg=COLORS["text_dim"]).pack(side=LEFT, padx=(0, 4))
+        self.base_col_var = StringVar()
+        self.base_col_picker = ttk.Combobox(map_row, textvariable=self.base_col_var,
+                                             state="readonly", width=28,
+                                             style="Modern.TCombobox", font=FONTS["body"])
+        self.base_col_picker.pack(side=LEFT)
+
+        Label(map_row, text=" ⟶ ", bg=COLORS["panel"], fg=COLORS["accent"],
+              font=("Segoe UI", 13, "bold")).pack(side=LEFT, padx=6)
+
+        self._label(map_row, "Upgraded col:", font=FONTS["small"],
+                    fg=COLORS["text_dim"]).pack(side=LEFT, padx=(0, 4))
+        self.upgrade_col_var = StringVar()
+        self.upgrade_col_picker = ttk.Combobox(map_row, textvariable=self.upgrade_col_var,
+                                                state="readonly", width=28,
+                                                style="Modern.TCombobox", font=FONTS["body"])
+        self.upgrade_col_picker.pack(side=LEFT, padx=(0, 12))
+
+        FlatButton(map_row, "＋  Add Pair",
+                   command=self.add_mapping_row, kind="primary").pack(side=LEFT, padx=(0, 6))
+        FlatButton(map_row, "✕  Remove Selected",
+                   command=self.remove_mapping_row, kind="ghost").pack(side=LEFT, padx=(0, 6))
+        FlatButton(map_row, "⊘  Clear All",
+                   command=self.clear_mappings, kind="subtle").pack(side=LEFT)
+
+        # mapping table
+        map_wrap_outer = Frame(c2, bg=COLORS["border"])
+        map_wrap_outer.pack(fill=X)
+        map_wrap = Frame(map_wrap_outer, bg=COLORS["panel_alt"], padx=1, pady=1)
+        map_wrap.pack(fill=BOTH, expand=True)
+
+        self.mapping_tree = ttk.Treeview(map_wrap,
+                                          columns=("idx", "base", "upgrade"),
+                                          show="headings", height=4,
+                                          style="Modern.Treeview")
+        self.mapping_tree.heading("idx",     text="#")
+        self.mapping_tree.heading("base",    text="Base Column")
+        self.mapping_tree.heading("upgrade", text="Upgraded Column")
+        self.mapping_tree.column("idx",     anchor="center", width=40,  stretch=False)
+        self.mapping_tree.column("base",    anchor=W,        width=550)
+        self.mapping_tree.column("upgrade", anchor=W,        width=550)
+        self.mapping_tree.pack(fill=X, expand=True)
+
+        # ── STEP 3: Options ─────────────────────────────────
+        c3 = self._card(body, fill=X, pady=(0, 10))
+        self._section_label(c3, "STEP 3   ·   Options").pack(fill=X, pady=(0, 8))
+
+        opt_row = Frame(c3, bg=COLORS["panel"])
+        opt_row.pack(fill=X)
+
+        self.case_sensitive_var = IntVar(value=0)
+        Checkbutton(opt_row, text="Case-sensitive comparison",
+                    variable=self.case_sensitive_var,
+                    bg=COLORS["panel"], fg=COLORS["text"],
+                    selectcolor=COLORS["panel_alt"],
+                    activebackground=COLORS["panel"],
+                    activeforeground=COLORS["text"],
+                    font=FONTS["small"]).pack(side=LEFT, padx=(0, 20))
+
+        self.strip_spaces_var = IntVar(value=1)
+        Checkbutton(opt_row, text="Strip leading/trailing spaces",
+                    variable=self.strip_spaces_var,
+                    bg=COLORS["panel"], fg=COLORS["text"],
+                    selectcolor=COLORS["panel_alt"],
+                    activebackground=COLORS["panel"],
+                    activeforeground=COLORS["text"],
+                    font=FONTS["small"]).pack(side=LEFT, padx=(0, 20))
+
+        self.open_after_var = IntVar(value=1)
+        Checkbutton(opt_row, text="Open report after generation",
+                    variable=self.open_after_var,
+                    bg=COLORS["panel"], fg=COLORS["text"],
+                    selectcolor=COLORS["panel_alt"],
+                    activebackground=COLORS["panel"],
+                    activeforeground=COLORS["text"],
+                    font=FONTS["small"]).pack(side=LEFT)
+
+        # ── CONSOLE ─────────────────────────────────────────
+        cc = self._card(body, fill=BOTH, expand=True, pady=(0, 4))
+        con_hdr = Frame(cc, bg=COLORS["panel"])
+        con_hdr.pack(fill=X, pady=(0, 6))
+        self._section_label(con_hdr, "CONSOLE").pack(side=LEFT, fill=X, expand=True)
+        FlatButton(con_hdr, "⊗  Clear",
+                   command=self.clear_console, kind="subtle").pack(side=RIGHT)
+
+        self.console_log = ScrolledText(
+            cc, height=9,
+            bg=COLORS["console_bg"], fg=COLORS["console_fg"],
+            insertbackground=COLORS["console_fg"],
+            font=FONTS["mono"], relief="flat", bd=0,
+            padx=12, pady=10,
+            selectbackground=COLORS["accent_glow"],
+            selectforeground=COLORS["text"]
+        )
+        self.console_log.pack(fill=BOTH, expand=True)
+        self.log("System ready  ·  Load CSV or Excel files to begin.", "info")
+
+    # ─────────────────────────────────────────────────────────
+    def _make_tree(self, parent, height=5):
+        wrap_outer = Frame(parent, bg=COLORS["border"])
+        wrap_outer.pack(fill=BOTH, expand=True)
+        wrap = Frame(wrap_outer, bg=COLORS["panel"])
+        wrap.pack(fill=BOTH, expand=True, padx=1, pady=1)
+
+        tree = ttk.Treeview(wrap, show="headings", height=height,
+                             style="Modern.Treeview")
+        vsb = ttk.Scrollbar(wrap, orient="vertical",   command=tree.yview)
+        hsb = ttk.Scrollbar(wrap, orient="horizontal", command=tree.xview)
+        tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
+        tree.grid(row=0, column=0, sticky=N + S + E + W)
+        vsb.grid(row=0, column=1, sticky=N + S)
+        hsb.grid(row=1, column=0, sticky=E + W)
+        wrap.rowconfigure(0, weight=1)
+        wrap.columnconfigure(0, weight=1)
+        return tree
+
+    # ─────────────────────────────────────────────────────────
+    def log(self, msg, level="info"):
+        icons = {"info": "·", "ok": "✔", "warn": "⚠", "err": "✖", "head": "═"}
+        icon = icons.get(level, "·")
+        ts   = datetime.now().strftime("%H:%M:%S")
+        line = f"[{ts}]  {icon}  {msg}\n"
+
+        self.console_log.insert(END, line)
+        self.console_log.see(END)
+
+    def clear_console(self):
+        self.console_log.delete("1.0", END)
+        self.log("Console cleared.", "info")
+
+    def _set_status(self, text, kind="neutral"):
+        colors = {
+            "neutral": (COLORS["panel_alt"], COLORS["text_dim"]),
+            "ok":      (COLORS["tag_green"], COLORS["success"]),
+            "warn":    ("#3d2e00",            COLORS["warning"]),
+            "err":     (COLORS["tag_red"],    COLORS["danger"]),
+            "run":     (COLORS["tag_blue"],   COLORS["accent"]),
+        }
+        bg, fg = colors.get(kind, colors["neutral"])
+        self.status_var.set(text)
+        self.status_pill.configure(bg=bg, fg=fg)
+
+    # ─────────────────────────────────────────────────────────
+    def handle_file_loading(self):
+        files = filedialog.askopenfilenames(
+            title="Select CSV or Excel Files",
+            filetypes=[
+                ("All Supported",   "*.csv *.tsv *.txt *.xlsx *.xls *.xlsm *.xlsb"),
+                ("CSV / Text",      "*.csv *.tsv *.txt"),
+                ("Excel Workbooks", "*.xlsx *.xls *.xlsm *.xlsb"),
+                ("All Files",       "*.*"),
+            ]
+        )
+        if not files:
+            return
+
+        self.loaded_data.clear()
+        self.file_stats.clear()
+
+        self.log("", "head")
+        self.log("Loading files…", "info")
+
+        for f in files:
+            name = os.path.basename(f)
+            try:
+                df, info = smart_read_file(f)
+                self.loaded_data[name] = df
+                self.file_stats[name]  = (df.shape[0], df.shape[1], info)
+                self.log(f"Loaded  {name}  →  {df.shape[0]} rows × {df.shape[1]} cols  ({info})", "ok")
+                self.log(f"   Columns: {', '.join(map(str, df.columns[:10]))}"
+                         + (" …" if len(df.columns) > 10 else ""))
+            except Exception as e:
+                self.log(f"Failed to load  {name}:  {e}", "err")
+
+        names = list(self.loaded_data.keys())
+        self.base_file_combo["values"]    = names
+        self.upgrade_file_combo["values"] = names
+
+        if len(names) >= 1:
+            self.base_file_combo.current(0)
+        if len(names) >= 2:
+            self.upgrade_file_combo.current(1)
+        elif len(names) == 1:
+            self.upgrade_file_combo.current(0)
+
+        self.sync_interface()
+        self._set_status(f"{len(names)} file(s) loaded", "ok")
+
+    def sync_interface(self):
+        base_name = self.base_file_var.get()
+        up_name   = self.upgrade_file_var.get()
+
+        self._populate_preview(base_name, self.base_tree)
+        self._populate_preview(up_name,   self.upgrade_tree)
+
+        def _stat(name, lbl):
+            if name in self.file_stats:
+                r, c, info = self.file_stats[name]
+                lbl.configure(text=f"({r} rows, {c} cols · {info})")
+            else:
+                lbl.configure(text="")
+
+        _stat(base_name, self.base_stat_lbl)
+        _stat(up_name,   self.upg_stat_lbl)
+
+        if base_name in self.loaded_data:
+            cols_b = [str(c) for c in self.loaded_data[base_name].columns]
+            self.base_col_picker["values"] = cols_b
+            if cols_b: self.base_col_picker.current(0)
+
+        if up_name in self.loaded_data:
+            cols_u = [str(c) for c in self.loaded_data[up_name].columns]
+            self.upgrade_col_picker["values"] = cols_u
+            if cols_u: self.upgrade_col_picker.current(0)
+
+    def _populate_preview(self, name, tree):
+        for item in tree.get_children():
+            tree.delete(item)
+        tree["columns"] = ()
+        if name not in self.loaded_data:
+            return
+        df   = self.loaded_data[name].head(5)
+        cols = [str(c) for c in df.columns]
+        tree["columns"] = cols
+        for c in cols:
+            tree.heading(c, text=c)
+            tree.column(c, width=120, anchor=W, stretch=False)
+        for _, row in df.iterrows():
+            tree.insert("", END, values=[str(v) for v in row.tolist()])
+
+    # ─────────────────────────────────────────────────────────
+    def add_mapping_row(self):
+        b_col = self.base_col_var.get()
+        u_col = self.upgrade_col_var.get()
+        if not b_col or not u_col:
+            self.log("Select both columns before adding a pair.", "warn")
+            return
+        existing = [(self.mapping_tree.item(i, "values")[1],
+                     self.mapping_tree.item(i, "values")[2])
+                    for i in self.mapping_tree.get_children()]
+        if (b_col, u_col) in existing:
+            self.log(f"Pair  {b_col} → {u_col}  already exists.", "warn")
+            return
+        idx = len(self.mapping_tree.get_children()) + 1
+        self.mapping_tree.insert("", END, values=(idx, b_col, u_col))
+        self.log(f"Mapping #{idx} added:  {b_col}  →  {u_col}", "ok")
+
+    def remove_mapping_row(self):
+        sel = self.mapping_tree.selection()
+        if not sel:
+            self.log("No mapping selected to remove.", "warn")
+            return
+        for s in sel:
+            self.mapping_tree.delete(s)
+        self._renumber_mappings()
+        self.log(f"Removed {len(sel)} mapping(s).")
+
+    def clear_mappings(self):
+        for i in self.mapping_tree.get_children():
+            self.mapping_tree.delete(i)
+        self.log("All mappings cleared.")
+
+    def _renumber_mappings(self):
+        for idx, iid in enumerate(self.mapping_tree.get_children(), 1):
+            vals = list(self.mapping_tree.item(iid, "values"))
+            vals[0] = idx
+            self.mapping_tree.item(iid, values=vals)
+
+    # ─────────────────────────────────────────────────────────
+    def run_audit_process(self):
+        b_name = self.base_file_var.get()
+        u_name = self.upgrade_file_var.get()
+
+        if not b_name or not u_name:
+            self.log("Select both Base and Upgraded files.", "err")
+            self._set_status("Missing file selection", "err")
+            return
+
+        mappings = []
+        for iid in self.mapping_tree.get_children():
+            vals = self.mapping_tree.item(iid, "values")
+            mappings.append((vals[1], vals[2]))
+
+        if not mappings:
+            self.log("No column mappings defined.", "err")
+            self._set_status("No mappings defined", "warn")
+            return
+
+        self._set_status("Running…", "run")
+        self.run_btn.configure(state="disabled", text="⏳  Running…")
+        self.root.update_idletasks()
+
+        try:
+            self._do_audit(b_name, u_name, mappings)
+        finally:
+            self.run_btn.configure(state="normal", text="▶  RUN COMPARISON")
+
+    # ─────────────────────────────────────────────────────────
+    def _do_audit(self, b_name, u_name, mappings):
+        self._run_count += 1
+        self.log("", "head")
+        self.log(f"Run #{self._run_count}  ·  {b_name}  vs  {u_name}", "head")
+
+        try:
+            df_b = self.loaded_data[b_name].copy().dropna(how="all")
+            df_u = self.loaded_data[u_name].copy().dropna(how="all")
+
+            id_col_b = df_b.columns[0]
+            id_col_u = df_u.columns[0]
+            self.log(f"Primary key  ·  Base: '{id_col_b}'   Upgraded: '{id_col_u}'")
+
+            df_b[id_col_b] = df_b[id_col_b].astype(str).str.strip()
+            df_u[id_col_u] = df_u[id_col_u].astype(str).str.strip()
+
+            keys_b = set(df_b[id_col_b])
+            keys_u = set(df_u[id_col_u])
+
+            missing_list  = sorted(keys_b - keys_u)
+            new_items_list = sorted(keys_u - keys_b)
+            common_ids    = keys_b & keys_u
+
+            missing   = pd.DataFrame({"Parameter (Missing in Upgraded)": missing_list})
+            new_items = pd.DataFrame({"Parameter (New in Upgraded)":    new_items_list})
+
+            self.log(f"Common IDs: {len(common_ids)}   |   "
+                     f"Only in Base: {len(missing_list)}   |   "
+                     f"Only in Upgraded: {len(new_items_list)}")
+
+            df_b_idx = (df_b[df_b[id_col_b].isin(common_ids)]
+                        .drop_duplicates(id_col_b).set_index(id_col_b))
+            df_u_idx = (df_u[df_u[id_col_u].isin(common_ids)]
+                        .drop_duplicates(id_col_u).set_index(id_col_u))
+
+            do_strip  = bool(self.strip_spaces_var.get())
+            case_sens = bool(self.case_sensitive_var.get())
+
+            def _norm(v):
+                s = str(v).strip() if do_strip else str(v)
+                return s if case_sens else s.lower()
+
+            # Build column headers for the variance sheet
+            var_headers = ["Parameter"]
+            for b_col, u_col in mappings:
+                var_headers.append(f"{b_col} (Base)")
+                var_headers.append(f"{u_col} (Upgraded)")
+
+            variance_rows = []
+            pairs_diff_counts = {f"{b}→{u}": 0 for b, u in mappings}
+
+            for uid in sorted(common_ids):
+                row_data   = {"Parameter": uid}
+                has_diff   = False
+
+                for b_col, u_col in mappings:
+                    try:
+                        v_b = df_b_idx.loc[uid, b_col]
+                    except KeyError:
+                        v_b = "N/A"
+                    try:
+                        v_u = df_u_idx.loc[uid, u_col]
+                    except KeyError:
+                        v_u = "N/A"
+
+                    if _norm(v_b) != _norm(v_u):
+                        has_diff = True
+                        pairs_diff_counts[f"{b_col}→{u_col}"] += 1
+
+                    row_data[f"{b_col} (Base)"]     = v_b
+                    row_data[f"{u_col} (Upgraded)"] = v_u
+
+                if has_diff:
+                    variance_rows.append(row_data)
+
+            variances_df = pd.DataFrame(variance_rows, columns=var_headers) \
+                           if variance_rows else pd.DataFrame(columns=var_headers)
+
+            summary_rows = [
+                {"Metric": "Total common parameters", "Value": len(common_ids)},
+                {"Metric": "Parameters with differences", "Value": len(variance_rows)},
+                {"Metric": "Parameters removed in Upgraded", "Value": len(missing_list)},
+                {"Metric": "Parameters new in Upgraded",     "Value": len(new_items_list)},
+                {"Metric": "─── Differences per mapped pair ───", "Value": ""},
+            ]
+            for pair_key, cnt in pairs_diff_counts.items():
+                summary_rows.append({"Metric": f"  {pair_key}", "Value": cnt})
+            summary_df = pd.DataFrame(summary_rows)
+
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            output_name = f"Audit_Report_{ts}.xlsx"
+
+            with pd.ExcelWriter(output_name, engine="openpyxl") as writer:
+                variances_df.to_excel(writer, sheet_name="Variances",     index=False)
+                missing.to_excel(     writer, sheet_name="Removed_Items", index=False)
+                new_items.to_excel(   writer, sheet_name="New_Items",     index=False)
+                summary_df.to_excel(  writer, sheet_name="Summary",       index=False)
+
+            style_excel_report(output_name, variances_df, missing, new_items, mappings)
+
+            self.log(f"Report saved  →  {output_name}", "ok")
+            self.log(f"  Parameters with differences : {len(variance_rows)}")
+            self.log(f"  Removed                     : {len(missing_list)}")
+            self.log(f"  New                         : {len(new_items_list)}")
+            for pair_key, cnt in pairs_diff_counts.items():
+                self.log(f"  Diffs in  {pair_key}  :  {cnt}")
+
+            self._set_status(
+                f"Done · {len(variance_rows)} diff(s) · {len(missing_list)} removed · {len(new_items_list)} new",
+                "ok"
+            )
+
+            if self.open_after_var.get():
+                try:
+                    if os.name == "nt":
+                        os.startfile(output_name)
+                    elif sys.platform == "darwin":
+                        os.system(f'open "{output_name}"')
+                    else:
+                        os.system(f'xdg-open "{output_name}"')
+                except Exception as e:
+                    self.log(f"(Could not auto-open file: {e})", "warn")
+
+        except Exception as e:
+            import traceback
+            self.log(f"FATAL:  {e}", "err")
+            self.log(traceback.format_exc(), "err")
+            self._set_status("Error — see console", "err")
+
+
+# =========================================================
+if __name__ == "__main__":
+    root = Tk()
+    app = ProfessionalAuditor(root)
+    root.mainloop()
