@@ -1,0 +1,8 @@
+customtkinter>=5.2.0
+opencv-python>=4.8.0
+numpy>=1.24.0
+Pillow>=10.0.0
+
+# Industrial camera SDKs — install whichever you need:
+pypylon>=3.0.0          # Basler cameras
+harvesters>=1.4.0       # GenICam/GenTL cameras (IMI Tech, Allied Vision, FLIR, IDS, Hikrobot, ...)
