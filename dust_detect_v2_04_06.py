@@ -1,5 +1,6 @@
 import cv2
 import numpy as np
+import math
 
 img = cv2.imread("test2.png")
 
@@ -17,7 +18,7 @@ result = img.copy()
 dust_count = 0
 detected = np.zeros(img.shape[:2], dtype=np.uint8)
 
-# ===== PASS A: bright dust (no shape filter) =====
+# ===== PASS A: sirf bada bright dust =====
 _, binary_bright = cv2.threshold(blurred, 200, 255, cv2.THRESH_BINARY)
 binary_bright = cv2.bitwise_and(binary_bright, mask)
 
@@ -31,29 +32,25 @@ for cnt in cont_b:
     cv2.circle(detected, (int(x), int(y)), int(r) + 20, 255, -1)
     dust_count += 1
 
-# ===== PASS B: faint dust via tophat, rings killed by aspect ratio =====
+# ===== PASS B: chure wala (EXACT wahi jo perfect chal raha tha) =====
 kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (41, 41))
 tophat = cv2.morphologyEx(blurred, cv2.MORPH_TOPHAT, kernel)
 tophat_masked = cv2.bitwise_and(tophat, mask)
-_, binary_faint = cv2.threshold(tophat_masked, 15, 255, cv2.THRESH_BINARY)
+_, binary = cv2.threshold(tophat_masked, 15, 255, cv2.THRESH_BINARY)
 
-cont_f, _ = cv2.findContours(binary_faint, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-for cnt in cont_f:
+contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+for cnt in contours:
     area = cv2.contourArea(cnt)
     if area < 3 or area > 500:
         continue
-
-    # aspect ratio se ring/arc reject
-    rect = cv2.minAreaRect(cnt)
-    (w, h) = rect[1]
-    if min(w, h) == 0:
+    perimeter = cv2.arcLength(cnt, True)
+    if perimeter == 0:
         continue
-    aspect = max(w, h) / min(w, h)
-    if aspect > 3:          # elongated = ring, skip
+    circularity = (4 * math.pi * area) / (perimeter ** 2)
+    if circularity < 0.4:
         continue
-
     (x, y), r = cv2.minEnclosingCircle(cnt)
-    if detected[int(y), int(x)] == 255:   # already mila pass A mein
+    if detected[int(y), int(x)] == 255:   # bada dust already pakda Pass A me
         continue
     cv2.circle(result, (int(x), int(y)), max(10, int(r) + 4), (0, 0, 255), 3)
     dust_count += 1
@@ -65,5 +62,4 @@ print("saved result.png")
 cv2.namedWindow("Result", cv2.WINDOW_NORMAL)
 cv2.imshow("Result", result)
 cv2.waitKey(0)
-cv2.destroyAllWindows()cv2.waitKey(0)
 cv2.destroyAllWindows()
