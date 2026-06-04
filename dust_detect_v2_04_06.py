@@ -14,25 +14,6 @@ for c, r in zip(centers, radii):
 gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
 blurred = cv2.GaussianBlur(gray, (5, 5), 0)
 
-result = img.copy()
-dust_count = 0
-
-# ===================== BADA DUST (naya block) =====================
-big_detected = np.zeros(img.shape[:2], dtype=np.uint8)
-_, binary_big = cv2.threshold(blurred, 200, 255, cv2.THRESH_BINARY)
-binary_big = cv2.bitwise_and(binary_big, mask)
-cont_big, _ = cv2.findContours(binary_big, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-for cnt in cont_big:
-    area = cv2.contourArea(cnt)
-    if area < 3:
-        continue
-    (x, y), r = cv2.minEnclosingCircle(cnt)
-    cv2.circle(result, (int(x), int(y)), max(10, int(r) + 4), (0, 0, 255), 3)
-    cv2.circle(big_detected, (int(x), int(y)), int(r) + 20, 255, -1)
-    dust_count += 1
-# ==================================================================
-
-# ===== TERA GOLDEN CODE - bilkul as-is =====
 kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (41, 41))
 tophat = cv2.morphologyEx(blurred, cv2.MORPH_TOPHAT, kernel)
 tophat_masked = cv2.bitwise_and(tophat, mask)
@@ -40,6 +21,9 @@ tophat_masked = cv2.bitwise_and(tophat, mask)
 _, binary = cv2.threshold(tophat_masked, 15, 255, cv2.THRESH_BINARY)
 
 contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+result = img.copy()
+dust_count = 0
 
 for cnt in contours:
     area = cv2.contourArea(cnt)
@@ -52,13 +36,12 @@ for cnt in contours:
     if circularity < 0.4:
         continue
     (x, y), r = cv2.minEnclosingCircle(cnt)
-    if big_detected[int(y), int(x)] == 255:   # bada dust already mila, skip
-        continue
     cv2.circle(result, (int(x), int(y)), max(10, int(r) + 4), (0, 0, 255), 3)
     dust_count += 1
 
 print("Dust found:", dust_count)
 
+# save result with red circles
 cv2.imwrite("result.png", result)
 print("saved result.png")
 
