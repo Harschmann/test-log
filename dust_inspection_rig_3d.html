@@ -1,0 +1,451 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>Dust Inspection Rig — Manual Test Bench (3D)</title>
+<style>
+  :root{
+    --bg:#0a0d12; --glass:rgba(13,18,24,.86); --line:#1e2933;
+    --ink:#dbe4ec; --muted:#7e8c99; --teal:#2fd6c3; --amber:#f2a83b;
+  }
+  *{box-sizing:border-box; -webkit-tap-highlight-color:transparent;}
+  html,body{margin:0;height:100%;overflow:hidden;background:var(--bg);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Inter,sans-serif;color:var(--ink);}
+  #c{display:block;width:100%;height:100%;touch-action:none;}
+  .mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;}
+
+  #hdr{position:fixed;top:0;left:0;right:0;padding:14px 16px 26px;
+    background:linear-gradient(180deg,rgba(8,11,15,.85),rgba(8,11,15,0));pointer-events:none;}
+  #hdr h1{margin:0;font-size:13px;font-weight:700;letter-spacing:.14em;text-transform:uppercase;color:var(--teal);}
+  #hdr p{margin:3px 0 0;font-size:11.5px;color:var(--muted);}
+
+  #bar{position:fixed;left:0;right:0;bottom:0;background:var(--glass);
+    border-top:1px solid var(--line);backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);
+    padding:10px 12px calc(12px + env(safe-area-inset-bottom));}
+  #chips{display:flex;gap:8px;overflow-x:auto;padding-bottom:8px;scrollbar-width:none;}
+  #chips::-webkit-scrollbar{display:none;}
+  .chip{flex:0 0 auto;font-size:12px;padding:7px 13px;border-radius:999px;border:1px solid #26313d;
+    background:transparent;color:var(--muted);cursor:pointer;user-select:none;transition:.15s;}
+  .chip.on{color:var(--teal);border-color:rgba(47,214,195,.55);background:rgba(47,214,195,.08);}
+  .chip:active{transform:scale(.96);}
+  #row2{display:flex;align-items:center;gap:12px;}
+  #zwrap{flex:1;display:flex;align-items:center;gap:10px;min-width:0;}
+  #zlab{font-size:11px;color:var(--muted);white-space:nowrap;}
+  input[type=range]{flex:1;appearance:none;-webkit-appearance:none;height:4px;border-radius:2px;
+    background:linear-gradient(90deg,var(--teal),#1e3a44);outline:none;min-width:60px;}
+  input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:20px;height:20px;border-radius:50%;
+    background:#0d1218;border:2px solid var(--teal);box-shadow:0 0 8px rgba(47,214,195,.5);}
+  #wd{font-size:12.5px;color:var(--teal);min-width:86px;text-align:right;}
+  #cap{flex:0 0 auto;font-size:12.5px;font-weight:700;letter-spacing:.05em;padding:9px 16px;border-radius:10px;
+    border:none;background:var(--amber);color:#1a1206;cursor:pointer;}
+  #cap:active{transform:scale(.96);}
+  #flash{position:fixed;inset:0;background:#fff;opacity:0;pointer-events:none;transition:opacity .28s ease;}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="hdr">
+  <h1>Dust Inspection Rig · Manual Test Bench</h1>
+  <p>drag = orbit &nbsp;·&nbsp; pinch / scroll = zoom &nbsp;·&nbsp; two-finger drag = pan</p>
+</div>
+<div id="bar">
+  <div id="chips">
+    <button class="chip on" id="tEnc">Enclosure</button>
+    <button class="chip on" id="tLight">Dome light</button>
+    <button class="chip on" id="tLab">Labels</button>
+    <button class="chip on" id="tFov">FOV cone</button>
+    <button class="chip" id="tDoor">Open door</button>
+  </div>
+  <div id="row2">
+    <div id="zwrap">
+      <span id="zlab">Z-axis</span>
+      <input type="range" id="z" min="60" max="230" value="130" step="1">
+      <span id="wd" class="mono">WD 130 mm</span>
+    </div>
+    <button id="cap">CAPTURE</button>
+  </div>
+</div>
+<div id="flash"></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+(function(){
+"use strict";
+const canvas=document.getElementById('c');
+const renderer=new THREE.WebGLRenderer({canvas,antialias:true});
+renderer.setPixelRatio(Math.min(window.devicePixelRatio,2));
+renderer.shadowMap.enabled=true;
+renderer.shadowMap.type=THREE.PCFSoftShadowMap;
+renderer.outputEncoding=THREE.sRGBEncoding;
+
+const scene=new THREE.Scene();
+scene.background=new THREE.Color(0x0a0d12);
+scene.fog=new THREE.Fog(0x0a0d12,1100,2400);
+
+const cam=new THREE.PerspectiveCamera(45,1,1,5000);
+
+/* ---------- orbit state ---------- */
+const target=new THREE.Vector3(0,215,0);
+let theta=0.72, phi=1.06, radius=880, autorot=true;
+function applyCam(){
+  phi=Math.max(0.12,Math.min(1.48,phi));
+  radius=Math.max(260,Math.min(1900,radius));
+  cam.position.set(
+    target.x+radius*Math.sin(phi)*Math.sin(theta),
+    target.y+radius*Math.cos(phi),
+    target.z+radius*Math.sin(phi)*Math.cos(theta));
+  cam.lookAt(target);
+}
+
+/* ---------- lights ---------- */
+scene.add(new THREE.HemisphereLight(0x93b7d9,0x0b0e12,0.5));
+const sun=new THREE.DirectionalLight(0xffffff,0.85);
+sun.position.set(340,620,280); sun.castShadow=true;
+sun.shadow.mapSize.set(2048,2048);
+sun.shadow.camera.left=-450; sun.shadow.camera.right=450;
+sun.shadow.camera.top=450; sun.shadow.camera.bottom=-450;
+sun.shadow.camera.near=10; sun.shadow.camera.far=1800; sun.shadow.bias=-0.0004;
+scene.add(sun);
+const fill=new THREE.DirectionalLight(0x6f87a3,0.28);
+fill.position.set(-380,220,-320); scene.add(fill);
+
+/* ---------- helpers ---------- */
+function M(c,r,m,e){const mat=new THREE.MeshStandardMaterial({color:c,roughness:r!==undefined?r:0.6,metalness:m!==undefined?m:0.25});if(e){mat.emissive=new THREE.Color(e);mat.emissiveIntensity=0.5;}return mat;}
+function box(w,h,d,mat,x,y,z,parent){const g=new THREE.Mesh(new THREE.BoxGeometry(w,h,d),mat);g.position.set(x,y,z);g.castShadow=true;g.receiveShadow=true;(parent||scene).add(g);return g;}
+function cyl(rt,rb,h,mat,x,y,z,parent,seg){const g=new THREE.Mesh(new THREE.CylinderGeometry(rt,rb,h,seg||24),mat);g.position.set(x,y,z);g.castShadow=true;g.receiveShadow=true;(parent||scene).add(g);return g;}
+function tube(a,b,r,mat,parent){const d=new THREE.Vector3().subVectors(b,a);const len=d.length();
+  const c=new THREE.Mesh(new THREE.CylinderGeometry(r,r,len,12),mat);
+  c.position.copy(a).addScaledVector(d,0.5);
+  c.quaternion.setFromUnitVectors(new THREE.Vector3(0,1,0),d.clone().normalize());
+  c.castShadow=true;(parent||scene).add(c);return c;}
+function roundedRect(w,h,r){const s=new THREE.Shape();const x=-w/2,y=-h/2;
+  s.moveTo(x+r,y); s.lineTo(x+w-r,y); s.quadraticCurveTo(x+w,y,x+w,y+r);
+  s.lineTo(x+w,y+h-r); s.quadraticCurveTo(x+w,y+h,x+w-r,y+h);
+  s.lineTo(x+r,y+h); s.quadraticCurveTo(x,y+h,x,y+h-r);
+  s.lineTo(x,y+r); s.quadraticCurveTo(x,y,x+r,y); return s;}
+
+/* ---------- materials ---------- */
+const mAlu   = M(0x8b939d,0.45,0.7);
+const mAluD  = M(0x5c646e,0.5,0.6);
+const mBlack = M(0x14181e,0.85,0.1);
+const mPanel = new THREE.MeshStandardMaterial({color:0x0d1116,roughness:0.9,metalness:0.05,transparent:true,opacity:0.20,side:THREE.DoubleSide,depthWrite:false});
+const mDoor  = new THREE.MeshStandardMaterial({color:0x11161d,roughness:0.85,metalness:0.08,transparent:true,opacity:0.34,side:THREE.DoubleSide,depthWrite:false});
+const mSteel = M(0xb9c1c9,0.35,0.85);
+const mCarr  = M(0x6e7883,0.5,0.6);
+const mCamB  = M(0x2e343c,0.5,0.5);
+const mLens  = M(0x1a1e24,0.35,0.7);
+const mAmber = M(0xf2a83b,0.4,0.4,0xa86a10);
+const mJig   = M(0x181c22,0.8,0.15);
+const mPhone = M(0xcdd3d9,0.35,0.65);
+const mBump  = M(0x3a4049,0.5,0.5);
+const mGlass = M(0x0a0d13,0.15,0.85);
+const mRing  = M(0x2a4a72,0.35,0.7);
+const mFrameL= M(0x22262d,0.6,0.4);
+
+/* ---------- floor ---------- */
+const floor=new THREE.Mesh(new THREE.PlaneGeometry(2600,2600),M(0x0d1218,1,0.05));
+floor.rotation.x=-Math.PI/2; floor.receiveShadow=true; scene.add(floor);
+const shadowPlane=new THREE.Mesh(new THREE.PlaneGeometry(2600,2600),new THREE.ShadowMaterial({opacity:0.4}));
+shadowPlane.rotation.x=-Math.PI/2; shadowPlane.position.y=0.4; shadowPlane.receiveShadow=true; scene.add(shadowPlane);
+const grid=new THREE.GridHelper(2400,40,0x1c2733,0x131b24);
+grid.position.y=0.8; scene.add(grid);
+
+/* ---------- base + frame ---------- */
+box(400,15,400,mAluD,0,7.5,0);
+const colPos=[[-180,-180],[180,-180],[-180,180],[180,180]];
+colPos.forEach(p=>box(40,520,40,mAlu,p[0],275,p[1]));
+box(400,40,40,mAlu,0,515,-180); box(400,40,40,mAlu,0,515,180);
+box(40,40,320,mAlu,-180,515,0);  box(40,40,320,mAlu,180,515,0);
+
+/* ---------- enclosure ---------- */
+const enc=new THREE.Group(); scene.add(enc);
+const pBack=new THREE.Mesh(new THREE.PlaneGeometry(360,520),mPanel); pBack.position.set(0,275,-180); enc.add(pBack);
+const pL=new THREE.Mesh(new THREE.PlaneGeometry(360,520),mPanel); pL.rotation.y=Math.PI/2; pL.position.set(-180,275,0); enc.add(pL);
+const pR=pL.clone(); pR.position.x=180; enc.add(pR);
+const pTop=new THREE.Mesh(new THREE.PlaneGeometry(400,400),mPanel); pTop.rotation.x=-Math.PI/2; pTop.position.set(0,537,0); enc.add(pTop);
+/* front door on hinge (left edge) */
+const doorPivot=new THREE.Group(); doorPivot.position.set(-180,275,181); enc.add(doorPivot);
+const doorMesh=new THREE.Mesh(new THREE.PlaneGeometry(360,520),mDoor); doorMesh.position.set(180,0,0); doorPivot.add(doorMesh);
+const handle=box(8,60,10,mSteel,342,0,7,doorPivot);
+box(360,14,6,mFrameL,180,253,2,doorPivot); box(360,14,6,mFrameL,180,-253,2,doorPivot);
+
+/* ---------- Z column + stage ---------- */
+box(80,480,24,mAluD,0,255,-150);
+box(120,18,60,mAluD,0,24,-150);
+const rail=box(16,430,8,mSteel,-14,255,-134); rail.position.z=-134;
+const screw=cyl(4,4,430,mSteel,22,255,-134);
+cyl(7,7,14,mCarr,22,472,-134);
+box(44,44,44,mBlack,22,501,-134);
+box(30,8,30,mAluD,22,526,-134);
+/* wires from motor */
+tube(new THREE.Vector3(22,523,-146),new THREE.Vector3(0,470,-160),2.5,mBlack);
+
+/* ---------- moving Z carriage + camera ---------- */
+const zg=new THREE.Group(); scene.add(zg);
+box(72,62,16,mCarr,0,0,-122,zg);
+box(26,14,132,mCarr,0,-38,-48,zg);
+box(34,10,34,mAluD,0,-50,0,zg);
+const camBody=box(36,52,36,mCamB,0,-81,0,zg);
+box(38,7,2,mAmber,0,-64,18.5,zg);                       /* brand stripe */
+const led=new THREE.Mesh(new THREE.SphereGeometry(2.2,10,10),M(0x37e07c,0.3,0.2,0x1fae57)); led.position.set(13,-95,18.5); zg.add(led);
+cyl(13,13,32,mLens,0,-123,0,zg);
+cyl(11,11,3,mGlass,0,-139.6,0,zg);
+cyl(14.5,14.5,4,mLens,0,-131,0,zg);                     /* focus ring */
+tube(new THREE.Vector3(0,-55,-16),new THREE.Vector3(0,-10,-108),2.5,mBlack,zg); /* camera cable */
+const LENS_BOTTOM=-141, PHONE_TOP=33;
+
+/* ---------- FOV cone ---------- */
+const fovMat=new THREE.MeshBasicMaterial({color:0x2fd6c3,transparent:true,opacity:0.07,side:THREE.DoubleSide,depthWrite:false});
+const fov=new THREE.Mesh(new THREE.CylinderGeometry(4,19,1,24,1,true),fovMat); scene.add(fov);
+
+/* ---------- flat dome light ---------- */
+const lightGrp=new THREE.Group(); scene.add(lightGrp);
+const panelShape=roundedRect(130,130,10);
+const holePath=new THREE.Path(); holePath.absarc(0,0,18,0,Math.PI*2,true);
+panelShape.holes.push(holePath);
+const panelGeo=new THREE.ExtrudeGeometry(panelShape,{depth:14,bevelEnabled:false,curveSegments:24});
+panelGeo.translate(0,0,-7);
+const panel=new THREE.Mesh(panelGeo,mFrameL);
+panel.rotation.x=-Math.PI/2; panel.position.set(0,58,0);
+panel.castShadow=true; lightGrp.add(panel);
+/* glowing diffuse underside */
+const glowShape=roundedRect(124,124,9); const gh=new THREE.Path(); gh.absarc(0,0,18,0,Math.PI*2,true); glowShape.holes.push(gh);
+const glow=new THREE.Mesh(new THREE.ShapeGeometry(glowShape,24),new THREE.MeshBasicMaterial({color:0xfff1d6,side:THREE.DoubleSide}));
+glow.rotation.x=Math.PI/2; glow.position.set(0,50.4,0); lightGrp.add(glow);
+const domeLight=new THREE.PointLight(0xffe6bd,1.15,340,2); domeLight.position.set(0,47,0); lightGrp.add(domeLight);
+/* mounting posts */
+[-1,1].forEach(s=>{
+  cyl(5,5,33,mSteel,71*s,31.5,0,lightGrp);
+  box(12,24,22,mAluD,71*s,56,0,lightGrp);
+});
+box(16,10,10,mBlack,0,58,72,lightGrp);   /* connector */
+tube(new THREE.Vector3(0,58,77),new THREE.Vector3(60,20,150),2.5,mBlack,lightGrp);
+
+/* ---------- phone jig (nest), camera bump centred on axis ---------- */
+box(176,10,100,mJig,48,20,15);
+[[-30,-25.5],[126,-25.5],[-30,55.5],[126,55.5]].forEach(p=>box(10,16,10,mBlack,p[0],33,p[1]));
+/* phone body */
+const phoneGeo=new THREE.ExtrudeGeometry(roundedRect(146,71,10),{depth:8,bevelEnabled:false,curveSegments:16});
+phoneGeo.translate(0,0,-4);
+const phone=new THREE.Mesh(phoneGeo,mPhone);
+phone.rotation.x=-Math.PI/2; phone.position.set(48,29,15); phone.castShadow=true; phone.receiveShadow=true; scene.add(phone);
+/* camera bump at world origin (optical axis) */
+const bumpGeo=new THREE.ExtrudeGeometry(roundedRect(30,58,9),{depth:3,bevelEnabled:false,curveSegments:16});
+bumpGeo.translate(0,0,-1.5);
+const bump=new THREE.Mesh(bumpGeo,mBump); bump.rotation.x=-Math.PI/2; bump.position.set(0,34.5,0); scene.add(bump);
+[-18,0,18].forEach(zz=>{
+  cyl(7,7,2,mRing,0,36.6,zz); cyl(4.8,4.8,1.4,mGlass,0,37.6,zz);
+});
+cyl(2.6,2.6,1.6,M(0xf5e6c8,0.3,0.2,0xc9b184),10,36.4,-18); /* flash */
+
+/* ---------- HMI monitor ---------- */
+const scv=document.createElement('canvas'); scv.width=640; scv.height=400;
+const sctx=scv.getContext('2d');
+const stex=new THREE.CanvasTexture(scv); stex.encoding=THREE.sRGBEncoding;
+let curWD=130;
+function drawScreen(mode){
+  const g=sctx;
+  g.fillStyle='#0a0f15'; g.fillRect(0,0,640,400);
+  g.fillStyle='#0e161f'; g.fillRect(0,0,640,52);
+  g.fillStyle='#2fd6c3'; g.font='600 22px Menlo,monospace';
+  g.fillText('DUST INSPECT · REAR CAM',22,34);
+  g.fillStyle='#4a5866'; g.font='16px Menlo,monospace'; g.fillText('v1.0',580,34);
+  /* lens field */
+  const cx=175,cy=228,r=132;
+  const grad=g.createRadialGradient(cx,cy,10,cx,cy,r);
+  grad.addColorStop(0,'#121a23'); grad.addColorStop(1,'#0a0e13');
+  g.fillStyle=grad; g.beginPath(); g.arc(cx,cy,r,0,7); g.fill();
+  g.strokeStyle='#33414f'; g.lineWidth=3; g.stroke();
+  g.strokeStyle='#1c2530'; g.lineWidth=1;
+  g.beginPath(); g.moveTo(cx-r,cy); g.lineTo(cx+r,cy); g.moveTo(cx,cy-r); g.lineTo(cx,cy+r); g.stroke();
+  g.fillStyle='#8f9aa6'; g.font='15px Menlo,monospace';
+  g.fillText('MODEL  SM-TEST',360,110);
+  g.fillText('WD     '+curWD+' mm',360,140);
+  g.fillText('EXP    12 ms · GAIN 0',360,170);
+  if(mode==='live'){
+    g.fillStyle='#2fd6c3'; g.font='700 52px Menlo,monospace'; g.fillText('LIVE',360,258);
+    g.fillStyle='#4a5866'; g.font='15px Menlo,monospace'; g.fillText('waiting for trigger…',360,300);
+    g.fillStyle='rgba(180,190,200,.18)';
+    for(let i=0;i<26;i++){const a=Math.random()*6.28,d=Math.random()*r*0.9;
+      g.fillRect(cx+Math.cos(a)*d,cy+Math.sin(a)*d,2,2);}
+  }else if(mode==='busy'){
+    g.fillStyle='#f2a83b'; g.font='700 40px Menlo,monospace'; g.fillText('CAPTURE…',360,258);
+  }else{
+    const dust=[[cx-58,cy-40],[cx+44,cy+22],[cx+12,cy-78]];
+    dust.forEach(p=>{g.fillStyle='#ff5d55'; g.fillRect(p[0]-1.5,p[1]-1.5,3,3);
+      g.strokeStyle='#ff5d55'; g.lineWidth=2.5; g.beginPath(); g.arc(p[0],p[1],13,0,7); g.stroke();});
+    g.strokeStyle='#4d9fff'; g.lineWidth=3; g.beginPath(); g.arc(cx-6,cy+6,r-24,0.55,1.25); g.stroke();
+    g.strokeStyle='#4d9fff'; g.lineWidth=2.2; g.beginPath(); g.arc(cx-40,cy+86,15,0,7); g.stroke();
+    g.strokeStyle='#ffd23f'; g.lineWidth=2.5; g.beginPath();
+    g.moveTo(cx+30,cy+58); g.quadraticCurveTo(cx+58,cy+42,cx+72,cy+66); g.quadraticCurveTo(cx+84,cy+84,cx+64,cy+92); g.stroke();
+    g.strokeStyle='#ffd23f'; g.lineWidth=2; g.beginPath(); g.arc(cx+58,cy+68,26,0,7); g.stroke();
+    g.fillStyle='#ff5d55'; g.font='700 56px Menlo,monospace'; g.fillText('NG',360,252);
+    g.font='16px Menlo,monospace';
+    g.fillStyle='#ff5d55'; g.fillText('● DUST   3',360,292);
+    g.fillStyle='#4d9fff'; g.fillText('● GLUE   1',360,318);
+    g.fillStyle='#ffd23f'; g.fillText('● FIBER  1',360,344);
+  }
+  g.fillStyle='#33414f'; g.font='13px Menlo,monospace';
+  g.fillText('Z-STAGE READY        LIGHT OK        DB SYNC OK',22,382);
+  stex.needsUpdate=true;
+}
+drawScreen('live');
+const mon=new THREE.Group(); mon.position.set(252,404,132); mon.rotation.y=-0.62; scene.add(mon);
+box(234,154,10,mBlack,0,0,0,mon);
+const screen=new THREE.Mesh(new THREE.PlaneGeometry(208,130),new THREE.MeshBasicMaterial({map:stex}));
+screen.position.set(0,2,5.6); mon.add(screen);
+box(14,34,14,mAluD,180,428,180);
+tube(new THREE.Vector3(180,430,176),new THREE.Vector3(246,406,142),5,mAluD);
+
+/* ---------- labels ---------- */
+const labels=new THREE.Group(); scene.add(labels);
+function makeSprite(lines){
+  const pad=26, fs=42, lh=54;
+  const c=document.createElement('canvas'); const x=c.getContext('2d');
+  x.font='600 '+fs+'px -apple-system,Segoe UI,Roboto,sans-serif';
+  let w=0; lines.forEach(t=>w=Math.max(w,x.measureText(t).width));
+  c.width=Math.ceil(w+pad*2); c.height=lh*lines.length+pad*1.4;
+  const g=c.getContext('2d');
+  g.fillStyle='rgba(11,16,22,.88)';
+  const r=20; g.beginPath();
+  g.moveTo(r,0); g.lineTo(c.width-r,0); g.quadraticCurveTo(c.width,0,c.width,r);
+  g.lineTo(c.width,c.height-r); g.quadraticCurveTo(c.width,c.height,c.width-r,c.height);
+  g.lineTo(r,c.height); g.quadraticCurveTo(0,c.height,0,c.height-r);
+  g.lineTo(0,r); g.quadraticCurveTo(0,0,r,0); g.fill();
+  g.strokeStyle='rgba(47,214,195,.45)'; g.lineWidth=3; g.stroke();
+  g.font='600 '+fs+'px -apple-system,Segoe UI,Roboto,sans-serif';
+  lines.forEach((t,i)=>{
+    g.fillStyle=i===0?'#e6eef5':'#8fa0ae';
+    g.fillText(t,pad,pad+fs*0.82+i*lh);
+  });
+  const tex=new THREE.CanvasTexture(c); tex.encoding=THREE.sRGBEncoding;
+  const sp=new THREE.Sprite(new THREE.SpriteMaterial({map:tex,depthTest:false,transparent:true}));
+  const H=lines.length>1?46:30;
+  sp.scale.set(H*c.width/c.height,H,1);
+  return sp;
+}
+function label(lines,anchor,offset,parent){
+  const sp=makeSprite(lines);
+  const pos=anchor.clone().add(offset);
+  sp.position.copy(pos);
+  const lg=new THREE.BufferGeometry().setFromPoints([anchor,pos]);
+  const ln=new THREE.Line(lg,new THREE.LineBasicMaterial({color:0x3c5561,transparent:true,opacity:0.85}));
+  (parent||labels).add(ln); (parent||labels).add(sp);
+}
+const zLabels=new THREE.Group(); zg.add(zLabels);
+label([ 'Machine-vision camera','GigE / USB3 + 25–35 mm lens' ], new THREE.Vector3(18,-81,4), new THREE.Vector3(140,42,60), zLabels);
+label([ 'Flat dome light','15–25 mm above phone, cam sees thru hole' ], new THREE.Vector3(-64,58,10), new THREE.Vector3(-150,64,120));
+label([ 'Phone nest jig','corner locators · bump on optical axis' ], new THREE.Vector3(120,28,40), new THREE.Vector3(150,26,150));
+label([ 'Z-stage','NEMA17 + lead screw (ESP32/GRBL)' ], new THREE.Vector3(26,470,-138), new THREE.Vector3(180,40,-40));
+label([ 'Dark enclosure','matte-black interior + front door' ], new THREE.Vector3(-180,340,-60), new THREE.Vector3(-150,60,-60));
+label([ 'HMI display' ], new THREE.Vector3(252,410,132), new THREE.Vector3(60,90,60));
+
+/* ---------- Z motion ---------- */
+let zTarget=0, zCur=0;
+function setWD(wd){
+  curWD=wd;
+  zTarget=PHONE_TOP+wd-LENS_BOTTOM;   /* group Y so lens bottom = phone top + wd */
+  document.getElementById('wd').textContent='WD '+wd+' mm';
+}
+function updateZ(){
+  zCur+=(zTarget-zCur)*0.12;
+  zg.position.y=zCur;
+  const lensY=zCur+LENS_BOTTOM;
+  const h=Math.max(1,lensY-PHONE_TOP);
+  fov.scale.y=h; fov.position.y=PHONE_TOP+h/2;
+}
+setWD(130); zCur=zTarget; updateZ();
+
+/* ---------- UI wiring ---------- */
+const $=id=>document.getElementById(id);
+function chip(btn,fn){btn.addEventListener('click',()=>{btn.classList.toggle('on');fn(btn.classList.contains('on'));});}
+chip($('tEnc'),on=>enc.visible=on);
+chip($('tLab'),on=>{labels.visible=on;zLabels.visible=on;});
+chip($('tFov'),on=>fov.visible=on);
+let lightOn=true;
+chip($('tLight'),on=>{lightOn=on;glow.visible=on;domeLight.intensity=on?1.15:0;});
+let doorOpen=false;
+$('tDoor').addEventListener('click',function(){
+  doorOpen=!doorOpen; this.classList.toggle('on',doorOpen);
+  this.textContent=doorOpen?'Close door':'Open door';
+});
+$('z').addEventListener('input',e=>{setWD(+e.target.value);drawScreen(monMode);});
+let monMode='live', capBusy=false;
+$('cap').addEventListener('click',()=>{
+  if(capBusy)return; capBusy=true;
+  monMode='busy'; drawScreen('busy');
+  const f=$('flash');
+  if(lightOn){domeLight.intensity=3.2;}
+  f.style.opacity=0.75;
+  setTimeout(()=>{f.style.opacity=0; if(lightOn)domeLight.intensity=1.15;},240);
+  setTimeout(()=>{monMode='result'; drawScreen('result');},780);
+  setTimeout(()=>{monMode='live'; drawScreen('live'); capBusy=false;},5200);
+});
+
+/* ---------- input: orbit / zoom / pan ---------- */
+let dragging=false,lx=0,ly=0,pinch=0,twoX=0,twoY=0;
+function panBy(dx,dy){
+  const right=new THREE.Vector3().setFromMatrixColumn(cam.matrix,0);
+  const up=new THREE.Vector3().setFromMatrixColumn(cam.matrix,1);
+  target.addScaledVector(right,-dx*radius*0.0011);
+  target.addScaledVector(up,dy*radius*0.0011);
+  target.y=Math.max(40,Math.min(480,target.y));
+}
+canvas.addEventListener('mousedown',e=>{dragging=true;autorot=false;lx=e.clientX;ly=e.clientY;});
+window.addEventListener('mousemove',e=>{
+  if(!dragging)return;
+  const dx=e.clientX-lx,dy=e.clientY-ly;lx=e.clientX;ly=e.clientY;
+  if(e.buttons&2||e.shiftKey){panBy(dx,dy);}else{theta-=dx*0.0055;phi-=dy*0.0055;}
+});
+window.addEventListener('mouseup',()=>dragging=false);
+canvas.addEventListener('contextmenu',e=>e.preventDefault());
+canvas.addEventListener('wheel',e=>{e.preventDefault();autorot=false;radius*=1+e.deltaY*0.0011;},{passive:false});
+canvas.addEventListener('touchstart',e=>{
+  autorot=false;
+  if(e.touches.length===1){lx=e.touches[0].clientX;ly=e.touches[0].clientY;}
+  else if(e.touches.length===2){
+    const a=e.touches[0],b=e.touches[1];
+    pinch=Math.hypot(a.clientX-b.clientX,a.clientY-b.clientY);
+    twoX=(a.clientX+b.clientX)/2; twoY=(a.clientY+b.clientY)/2;
+  }
+},{passive:true});
+canvas.addEventListener('touchmove',e=>{
+  e.preventDefault();
+  if(e.touches.length===1){
+    const t=e.touches[0];
+    theta-=(t.clientX-lx)*0.0062; phi-=(t.clientY-ly)*0.0062;
+    lx=t.clientX; ly=t.clientY;
+  }else if(e.touches.length===2){
+    const a=e.touches[0],b=e.touches[1];
+    const d=Math.hypot(a.clientX-b.clientX,a.clientY-b.clientY);
+    radius*=pinch/d; pinch=d;
+    const mx=(a.clientX+b.clientX)/2,my=(a.clientY+b.clientY)/2;
+    panBy(mx-twoX,my-twoY); twoX=mx; twoY=my;
+  }
+},{passive:false});
+
+/* ---------- resize + loop ---------- */
+function resize(){
+  const w=window.innerWidth,h=window.innerHeight;
+  renderer.setSize(w,h,false);
+  cam.aspect=w/h; cam.updateProjectionMatrix();
+}
+window.addEventListener('resize',resize); resize();
+
+let doorCur=0;
+function loop(t){
+  requestAnimationFrame(loop);
+  if(autorot)theta+=0.0018;
+  const dTgt=doorOpen?-1.35:0;
+  doorCur+=(dTgt-doorCur)*0.1;
+  doorPivot.rotation.y=doorCur;
+  updateZ();
+  applyCam();
+  renderer.render(scene,cam);
+}
+requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>
