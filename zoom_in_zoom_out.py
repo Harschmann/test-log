@@ -38,3 +38,19 @@ def add_zoom_support(window_name, image):
 
     # Window par mouse event attach karein
     cv2.setMouseCallback(window_name, mouse_callback)
+
+
+import cv2
+
+# 1. Image load karein
+img = cv2.imread('image.jpg')
+
+# 2. Apni resizable window create karein
+cv2.namedWindow('My Resizable Window', cv2.WINDOW_NORMAL)
+
+# 3. YAHAN APNA FUNCTION ADD KAREIN
+add_zoom_support('My Resizable Window', img)
+
+# Bas ho gaya! Ab user jab tak koi key nahi dabata, window open rahegi aur pinch/scroll kaam karega
+cv2.waitKey(0)
+cv2.destroyAllWindows()
